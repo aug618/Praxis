@@ -6,11 +6,13 @@ For multimodal models, message["content"] may be a list of content parts
 """
 
 import os
+import time
 from typing import Any, Iterator, Literal, Optional
 from openai import OpenAI
 
 from .exceptions import HelloAgentsException
 from .config import is_multimodal_model, AVAILABLE_MODELS
+from utils.observability import log_event, estimate_prompt_tokens, estimate_completion_tokens
 
 # 支持的LLM提供商
 SUPPORTED_PROVIDERS = Literal[
@@ -81,24 +83,54 @@ class HelloAgentsLLM:
         """判断当前模型是否支持多模态"""
         return is_multimodal_model(self.model)
     
-    def switch_model(self, model_name: str, base_url: Optional[str] = None) -> None:
+    def switch_model(self, model_name: str, base_url: Optional[str] = None, api_key: Optional[str] = None) -> None:
         """
         切换到指定模型
         
         Args:
             model_name: 模型名称（如 glm-4.7, glm-4.6v-flash）
             base_url: 可选的 base_url，如果不提供则尝试从预定义配置获取
+            api_key: 可选的 api_key，如果不提供则尝试从预定义配置的环境变量获取
         """
         self.model = model_name
+        need_rebuild = False
         
-        # 如果模型在预定义列表中，更新 base_url
-        if model_name in AVAILABLE_MODELS and base_url is None:
-            new_base_url = AVAILABLE_MODELS[model_name].get("base_url")
+        if model_name in AVAILABLE_MODELS:
+            info = AVAILABLE_MODELS[model_name]
+            
+            # 更新 base_url
+            new_base_url = base_url or info.get("base_url")
             if new_base_url and new_base_url != self.base_url:
                 self.base_url = new_base_url
-                self._client = self._create_client()
-        elif base_url:
-            self.base_url = base_url
+                need_rebuild = True
+            
+            # 更新 api_key（从对应环境变量读取）
+            if api_key:
+                self.api_key = api_key
+                need_rebuild = True
+            elif info.get("api_key_env"):
+                # 支持多个环境变量名，按优先级尝试
+                env_names = info["api_key_env"]
+                if isinstance(env_names, str):
+                    env_names = [env_names]
+                for env_name in env_names:
+                    new_key = os.getenv(env_name)
+                    if new_key:
+                        if new_key != self.api_key:
+                            self.api_key = new_key
+                            need_rebuild = True
+                        break
+        else:
+            # 未知模型，使用传入参数
+            if base_url and base_url != self.base_url:
+                self.base_url = base_url
+                need_rebuild = True
+            if api_key and api_key != self.api_key:
+                self.api_key = api_key
+                need_rebuild = True
+        
+        # 重建客户端
+        if need_rebuild:
             self._client = self._create_client()
 
     def _auto_detect_provider(self, api_key: Optional[str], base_url: Optional[str]) -> str:
@@ -201,7 +233,7 @@ class HelloAgentsLLM:
 
         elif self.provider == "qwen":
             resolved_api_key = api_key or os.getenv("DASHSCOPE_API_KEY") or os.getenv("LLM_API_KEY")
-            resolved_base_url = base_url or os.getenv("LLM_BASE_URL") or "https://dashscope.aliyuncs.com/compatible-mode/v1"
+            resolved_base_url = base_url or os.getenv("DASHSCOPE_BASE_URL") or "https://dashscope.aliyuncs.com/compatible-mode/v1"
             return resolved_api_key, resolved_base_url
 
         elif self.provider == "modelscope":
@@ -304,6 +336,8 @@ class HelloAgentsLLM:
             str: 流式响应的文本片段
         """
         print(f"🧠 正在调用 {self.model} 模型...")
+        start = time.time()
+        stream_text_parts: list[str] = []
         try:
             response = self._client.chat.completions.create(
                 model=self.model,
@@ -319,11 +353,36 @@ class HelloAgentsLLM:
                 content = chunk.choices[0].delta.content or ""
                 if content:
                     print(content, end="", flush=True)
+                    stream_text_parts.append(content)
                     yield content
             print()  # 在流式输出结束后换行
+            completion_text = "".join(stream_text_parts)
+            log_event(
+                "llm",
+                {
+                    "model": self.model,
+                    "provider": self.provider,
+                    "stream": True,
+                    "ok": True,
+                    "ms": int((time.time() - start) * 1000),
+                    "prompt_tokens_est": estimate_prompt_tokens(messages),
+                    "completion_tokens_est": estimate_completion_tokens(completion_text),
+                },
+            )
 
         except Exception as e:
             print(f"❌ 调用LLM API时发生错误: {e}")
+            log_event(
+                "llm",
+                {
+                    "model": self.model,
+                    "provider": self.provider,
+                    "stream": True,
+                    "ok": False,
+                    "ms": int((time.time() - start) * 1000),
+                    "error": str(e),
+                },
+            )
             raise HelloAgentsException(f"LLM调用失败: {str(e)}")
 
     def invoke(self, messages: list[dict[str, Any]], **kwargs) -> str:
@@ -331,6 +390,7 @@ class HelloAgentsLLM:
         非流式调用LLM，返回完整响应。
         适用于不需要流式输出的场景。
         """
+        start = time.time()
         try:
             response = self._client.chat.completions.create(
                 model=self.model,
@@ -339,8 +399,36 @@ class HelloAgentsLLM:
                 max_tokens=kwargs.get('max_tokens', self.max_tokens),
                 **{k: v for k, v in kwargs.items() if k not in ['temperature', 'max_tokens']}
             )
-            return response.choices[0].message.content
+            content = response.choices[0].message.content
+            usage = getattr(response, "usage", None)
+            log_event(
+                "llm",
+                {
+                    "model": self.model,
+                    "provider": self.provider,
+                    "stream": False,
+                    "ok": True,
+                    "ms": int((time.time() - start) * 1000),
+                    "prompt_tokens": getattr(usage, "prompt_tokens", None),
+                    "completion_tokens": getattr(usage, "completion_tokens", None),
+                    "total_tokens": getattr(usage, "total_tokens", None),
+                    "prompt_tokens_est": estimate_prompt_tokens(messages),
+                    "completion_tokens_est": estimate_completion_tokens(content),
+                },
+            )
+            return content
         except Exception as e:
+            log_event(
+                "llm",
+                {
+                    "model": self.model,
+                    "provider": self.provider,
+                    "stream": False,
+                    "ok": False,
+                    "ms": int((time.time() - start) * 1000),
+                    "error": str(e),
+                },
+            )
             raise HelloAgentsException(f"LLM调用失败: {str(e)}")
 
     def stream_invoke(self, messages: list[dict[str, Any]], **kwargs) -> Iterator[str]:

@@ -7,31 +7,40 @@ from pydantic import BaseModel, Field
 
 
 # ==================== 模型定义 ====================
-# 预定义的模型配置：名称 -> (是否多模态, 默认base_url, 描述)
+# 预定义的模型配置
+# - multimodal: 是否支持多模态
+# - base_url: API 地址
+# - api_key_env: 对应的 API Key 环境变量名（切换模型时自动读取）
+# - description: 模型描述
 AVAILABLE_MODELS: Dict[str, Dict[str, Any]] = {
     "glm-4.7": {
         "multimodal": False,
         "base_url": "https://open.bigmodel.cn/api/paas/v4",
+        "api_key_env": ["ZHIPU_API_KEY", "GLM_API_KEY"],
         "description": "智谱 GLM-4.7 文本模型（默认）",
     },
     "glm-4.6v-flash": {
         "multimodal": True,
         "base_url": "https://open.bigmodel.cn/api/paas/v4",
+        "api_key_env": ["ZHIPU_API_KEY", "GLM_API_KEY"],
         "description": "智谱 GLM-4.6V-Flash 多模态模型（支持图片理解）",
     },
     "deepseek-chat": {
         "multimodal": False,
         "base_url": "https://api.deepseek.com",
+        "api_key_env": ["DEEPSEEK_API_KEY"],
         "description": "DeepSeek Chat 文本模型",
     },
     "qwen-plus": {
         "multimodal": False,
         "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "api_key_env": ["DASHSCOPE_API_KEY", "QWEN_API_KEY"],
         "description": "通义千问 Plus 文本模型",
     },
     "qwen-vl-plus": {
         "multimodal": True,
         "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "api_key_env": ["DASHSCOPE_API_KEY", "QWEN_API_KEY"],
         "description": "通义千问 VL Plus 多模态模型",
     },
 }
@@ -66,12 +75,6 @@ class Config(BaseModel):
     max_tokens: Optional[int] = Field(default=None, description="最大 token 数")
     llm_timeout: int = Field(default=60, gt=0, description="LLM 请求超时（秒）")
     
-    # ==================== OCR 配置 ====================
-    ocr_mcp_command: Optional[List[str]] = Field(
-        default=None,
-        description="MCP OCR 服务启动命令，如 ['npx', 'ocr-mcp-server']"
-    )
-    ocr_fallback_local: bool = Field(default=True, description="MCP 失败时是否尝试本地 OCR")
     
     # ==================== Agent 配置 ====================
     max_react_steps: int = Field(default=20, gt=0, le=50, description="ReAct 最大步数")

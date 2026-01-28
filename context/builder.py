@@ -11,6 +11,7 @@ from typing import Dict, Any, List, Optional, Tuple, TYPE_CHECKING, Any as Typin
 from dataclasses import dataclass, field
 from datetime import datetime
 import tiktoken
+from utils.observability import log_event
 import math
 
 from core.message import Message
@@ -169,7 +170,17 @@ class ContextBuilder:
         structured_context = self._structure_base(packets, user_query)
         
         # 压缩（如果超预算）
-        return self._compress(structured_context)
+        final_context = self._compress(structured_context)
+        log_event(
+            "context_base",
+            {
+                "tokens": count_tokens(final_context),
+                "history_turns": len(conversation_history or []),
+                "tool_summaries": len(tool_summaries or []),
+                "lazy_fetch": self.config.lazy_fetch,
+            },
+        )
+        return final_context
     
     def _structure_base(
         self,

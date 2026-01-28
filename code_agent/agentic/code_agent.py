@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shlex
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -17,6 +19,7 @@ from tools.builtin.terminal_tool import TerminalTool
 from tools.builtin.plan_tool import PlanTool
 from tools.builtin.todo_tool import TodoTool
 from tools.builtin.context_fetch_tool import ContextFetchTool
+from tools.builtin.protocol_tools import MCPTool
 from utils.multimodal import image_part_from_path
 from utils.references import parse_references
 from tools.builtin.ocr_tool import extract_text_from_image
@@ -77,6 +80,8 @@ class CodeAgent:
         self.paths.helloagents_dir.mkdir(parents=True, exist_ok=True)
         self.paths.notes_dir.mkdir(parents=True, exist_ok=True)
         self.paths.sessions_dir.mkdir(parents=True, exist_ok=True)
+        self.paths.logs_dir.mkdir(parents=True, exist_ok=True)
+        os.environ.setdefault("CODE_AGENT_LOG_DIR", str(self.paths.logs_dir))
         # memory / logs 仅在需要时创建，这里不再预建
 
         self.session_id = f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -111,6 +116,50 @@ class CodeAgent:
             context_lines=5,
         )
         self.registry.register_tool(self.context_fetch_tool)
+
+        # ========== MCP Monitor 工具（系统监控）==========
+        # 优先使用环境变量 MCP_MONITOR_COMMAND，其次尝试默认路径
+        monitor_cmd: Optional[List[str]] = None
+        env_cmd = os.getenv("MCP_MONITOR_COMMAND", "").strip()
+        if env_cmd:
+            monitor_cmd = shlex.split(env_cmd)
+        else:
+            default_bin = self.paths.repo_root / "test" / "mcp-monitor" / "bin" / "mcp-monitor"
+            if default_bin.exists():
+                monitor_cmd = [str(default_bin)]
+
+        if monitor_cmd:
+            try:
+                monitor_tool = MCPTool(
+                    name="monitor",
+                    server_command=monitor_cmd,
+                    auto_expand=True,
+                )
+                for t in monitor_tool.get_expanded_tools():
+                    self.registry.register_tool(t)
+                print(f"✅ MCP Monitor 已注册（{len(monitor_tool.get_expanded_tools())} 工具）")
+            except Exception as e:
+                print(f"⚠️ MCP Monitor 注册失败: {e}")
+
+        # ========== MCP Playwright 工具（网页自动化）==========
+        # 通过环境变量 MCP_PLAYWRIGHT_COMMAND 指定启动命令
+        playwright_cmd: Optional[List[str]] = None
+        env_playwright = os.getenv("MCP_PLAYWRIGHT_COMMAND", "").strip()
+        if env_playwright:
+            playwright_cmd = shlex.split(env_playwright)
+
+        if playwright_cmd:
+            try:
+                playwright_tool = MCPTool(
+                    name="playwright",
+                    server_command=playwright_cmd,
+                    auto_expand=True,
+                )
+                for t in playwright_tool.get_expanded_tools():
+                    self.registry.register_tool(t)
+                print(f"✅ MCP Playwright 已注册（{len(playwright_tool.get_expanded_tools())} 工具）")
+            except Exception as e:
+                print(f"⚠️ MCP Playwright 注册失败: {e}")
 
         # 初始化上下文构建器（lazy_fetch=True：只构建保底上下文）
         self.context_builder = ContextBuilder(
@@ -158,7 +207,7 @@ class CodeAgent:
             max_steps=20,
             custom_prompt=react_prompt,
             observation_summarizer=_summarize_observation,
-            summarize_threshold_chars=1800,
+            summarize_threshold_chars=2500,
         )
 
         base_system = (self.paths.prompts_dir / "system.md").read_text(encoding="utf-8")
@@ -295,9 +344,8 @@ class CodeAgent:
             # 文本模型：图片走 OCR
             if all_image_paths:
                 print(f"🔍 文本模式：{len(all_image_paths)} 张图片将通过 OCR 提取文字")
-                mcp_cmd = getattr(self.config, 'ocr_mcp_command', None)
                 for img_path in all_image_paths:
-                    ocr_text = extract_text_from_image(img_path, mcp_server_command=mcp_cmd)
+                    ocr_text = extract_text_from_image(img_path)
                     if ocr_text and not ocr_text.startswith("错误") and not ocr_text.startswith("OCR 失败"):
                         ocr_results.append(f"[OCR 识别: {img_path.name}]\n```\n{ocr_text}\n```")
                         print(f"  ✓ {img_path.name}: 提取到 {len(ocr_text)} 字符")

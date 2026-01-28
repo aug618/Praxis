@@ -150,9 +150,9 @@ class ReActAgent(Agent):
         preview = input_text.replace("\n", " ")
         if len(preview) > 160:
             preview = preview[:160] + "..."
-        print("\n" + hr("=", 80))
-        print(c(f"🤖 {self.name}", PRIMARY) + " " + c(f"{preview}", INFO))
-        print(hr("=", 80))
+        # print("\n" + hr("=", 80))
+        # print(c(f"🤖 {self.name}", PRIMARY) + " " + c(f"{preview}", INFO))
+        # print(hr("=", 80))
         
         repeat_count = 0
         last_action_sig: Optional[str] = None

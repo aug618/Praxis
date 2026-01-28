@@ -2,7 +2,9 @@
 
 from typing import Optional, Any, Callable
 import json
+import time
 from .base import Tool
+from utils.observability import log_event
 
 class ToolRegistry:
     """
@@ -29,7 +31,7 @@ class ToolRegistry:
             print(f"⚠️ 警告：工具 '{tool.name}' 已存在，将被覆盖。")
 
         self._tools[tool.name] = tool
-        print(f"✅ 工具 '{tool.name}' 已注册。")
+        #print(f"✅ 工具 '{tool.name}' 已注册。")
 
     def register_function(self, name: str, description: str, func: Callable[[str], str]):
         """
@@ -47,7 +49,7 @@ class ToolRegistry:
             "description": description,
             "func": func
         }
-        print(f"✅ 工具 '{name}' 已注册。")
+        #print(f"✅ 工具 '{name}' 已注册。")
 
     def unregister(self, name: str):
         """注销工具"""
@@ -84,6 +86,7 @@ class ToolRegistry:
         if name in self._tools:
             tool = self._tools[name]
             try:
+                start = time.time()
                 raw = (input_text or "").strip()
                 
                 # 预处理：如果输入包含换行和另一个 Action，只取第一行
@@ -153,31 +156,47 @@ class ToolRegistry:
                         pass
 
                 if isinstance(obj, dict):
-                    return tool.run(obj)
+                    result = tool.run(obj)
+                    log_event("tool", {"tool": name, "ok": True, "ms": int((time.time() - start) * 1000)})
+                    return result
 
                 # 2) 单参数兜底：如果工具只有一个必填参数，把 input_text 映射到该参数名
                 params = tool.get_parameters()
                 required = [p for p in params if p.required]
+                # 2a 无必填参数：允许空参数调用
+                if len(required) == 0:
+                    result = tool.run({})
+                    log_event("tool", {"tool": name, "ok": True, "ms": int((time.time() - start) * 1000)})
+                    return result
                 if len(required) == 1:
-                    return tool.run({required[0].name: input_text})
+                    result = tool.run({required[0].name: input_text})
+                    log_event("tool", {"tool": name, "ok": True, "ms": int((time.time() - start) * 1000)})
+                    return result
 
                 # 3) 兼容旧行为：若存在 input 参数，使用 input
                 if any(p.name == "input" for p in params):
-                    return tool.run({"input": input_text})
+                    result = tool.run({"input": input_text})
+                    log_event("tool", {"tool": name, "ok": True, "ms": int((time.time() - start) * 1000)})
+                    return result
 
                 return (
                     f"错误：工具 '{name}' 需要结构化参数。"
                     "请使用 JSON 形式传参，例如：tool[{\"param\":\"value\"}]"
                 )
             except Exception as e:
+                log_event("tool", {"tool": name, "ok": False, "ms": int((time.time() - start) * 1000), "error": str(e)})
                 return f"错误：执行工具 '{name}' 时发生异常: {str(e)}"
 
         # 查找函数工具
         elif name in self._functions:
             func = self._functions[name]["func"]
             try:
-                return func(input_text)
+                start = time.time()
+                result = func(input_text)
+                log_event("tool", {"tool": name, "ok": True, "ms": int((time.time() - start) * 1000)})
+                return result
             except Exception as e:
+                log_event("tool", {"tool": name, "ok": False, "ms": int((time.time() - start) * 1000), "error": str(e)})
                 return f"错误：执行工具 '{name}' 时发生异常: {str(e)}"
 
         else:
