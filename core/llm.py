@@ -1,10 +1,16 @@
-"""HelloAgents统一LLM接口 - 基于OpenAI原生API"""
+"""HelloAgents统一LLM接口 - 基于OpenAI原生API
+
+This client is intentionally compatible with OpenAI-style chat messages.
+For multimodal models, message["content"] may be a list of content parts
+(e.g. [{"type":"text","text":"..."}, {"type":"image_url", ...}]).
+"""
 
 import os
-from typing import Literal, Optional, Iterator
+from typing import Any, Iterator, Literal, Optional
 from openai import OpenAI
 
 from .exceptions import HelloAgentsException
+from .config import is_multimodal_model, AVAILABLE_MODELS
 
 # 支持的LLM提供商
 SUPPORTED_PROVIDERS = Literal[
@@ -69,6 +75,31 @@ class HelloAgentsLLM:
 
         # 创建OpenAI客户端
         self._client = self._create_client()
+
+    @property
+    def is_multimodal(self) -> bool:
+        """判断当前模型是否支持多模态"""
+        return is_multimodal_model(self.model)
+    
+    def switch_model(self, model_name: str, base_url: Optional[str] = None) -> None:
+        """
+        切换到指定模型
+        
+        Args:
+            model_name: 模型名称（如 glm-4.7, glm-4.6v-flash）
+            base_url: 可选的 base_url，如果不提供则尝试从预定义配置获取
+        """
+        self.model = model_name
+        
+        # 如果模型在预定义列表中，更新 base_url
+        if model_name in AVAILABLE_MODELS and base_url is None:
+            new_base_url = AVAILABLE_MODELS[model_name].get("base_url")
+            if new_base_url and new_base_url != self.base_url:
+                self.base_url = new_base_url
+                self._client = self._create_client()
+        elif base_url:
+            self.base_url = base_url
+            self._client = self._create_client()
 
     def _auto_detect_provider(self, api_key: Optional[str], base_url: Optional[str]) -> str:
         """
@@ -260,7 +291,7 @@ class HelloAgentsLLM:
             else:
                 return "gpt-3.5-turbo"
 
-    def think(self, messages: list[dict[str, str]], temperature: Optional[float] = None) -> Iterator[str]:
+    def think(self, messages: list[dict[str, Any]], temperature: Optional[float] = None) -> Iterator[str]:
         """
         调用大语言模型进行思考，并返回流式响应。
         这是主要的调用方法，默认使用流式响应以获得更好的用户体验。
@@ -295,7 +326,7 @@ class HelloAgentsLLM:
             print(f"❌ 调用LLM API时发生错误: {e}")
             raise HelloAgentsException(f"LLM调用失败: {str(e)}")
 
-    def invoke(self, messages: list[dict[str, str]], **kwargs) -> str:
+    def invoke(self, messages: list[dict[str, Any]], **kwargs) -> str:
         """
         非流式调用LLM，返回完整响应。
         适用于不需要流式输出的场景。
@@ -312,7 +343,7 @@ class HelloAgentsLLM:
         except Exception as e:
             raise HelloAgentsException(f"LLM调用失败: {str(e)}")
 
-    def stream_invoke(self, messages: list[dict[str, str]], **kwargs) -> Iterator[str]:
+    def stream_invoke(self, messages: list[dict[str, Any]], **kwargs) -> Iterator[str]:
         """
         流式调用LLM的别名方法，与think方法功能相同。
         保持向后兼容性。

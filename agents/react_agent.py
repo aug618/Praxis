@@ -139,6 +139,9 @@ class ReActAgent(Agent):
         Returns:
             最终答案
         """
+        # Optional multimodal attachments (OpenAI-compatible content parts).
+        # Example: [{"type":"image_url","image_url":{"url":"data:image/png;base64,..."}}]
+        attachments = kwargs.pop("attachments", None)
         self.current_history = []
         self.last_trace = []
         current_step = 0
@@ -167,8 +170,11 @@ class ReActAgent(Agent):
                 history=history_str
             )
             
-            # 调用LLM
-            messages = [{"role": "user", "content": prompt}]
+            # 调用LLM（支持多模态：prompt + images）
+            user_content: Any = prompt
+            if attachments:
+                user_content = [{"type": "text", "text": prompt}, *list(attachments)]
+            messages = [{"role": "user", "content": user_content}]
             spinner = Spinner("Thinking…")
             spinner.start()
             response_text = self.llm.invoke(messages, **kwargs)
@@ -196,8 +202,11 @@ class ReActAgent(Agent):
                     repair_user = f"Rewrite the following into the required two-line format:\n\n{response_text}"
                     spinner = Spinner("Repairing format…")
                     spinner.start()
+                    repair_user_content: Any = repair_user
+                    if attachments:
+                        repair_user_content = [{"type": "text", "text": repair_user}, *list(attachments)]
                     repaired = self.llm.invoke(
-                        [{"role": "system", "content": repair_sys}, {"role": "user", "content": repair_user}],
+                        [{"role": "system", "content": repair_sys}, {"role": "user", "content": repair_user_content}],
                         max_tokens=200,
                     )
                     spinner.stop()
@@ -287,9 +296,13 @@ class ReActAgent(Agent):
                     "2) 明确已完成的证据/发现\n"
                     "3) 如果信息不足，说清楚缺少什么，并给出下一步最小化建议（1-3条）\n"
                 )
+                final_user_text = f"Question:\n{input_text}\n\nTools:\n{tools_desc}\n\nTrace:\n{history_str}"
+                final_user_content: Any = final_user_text
+                if attachments:
+                    final_user_content = [{"type": "text", "text": final_user_text}, *list(attachments)]
                 messages = [
                     {"role": "system", "content": finalize_prompt},
-                    {"role": "user", "content": f"Question:\n{input_text}\n\nTools:\n{tools_desc}\n\nTrace:\n{history_str}"},
+                    {"role": "user", "content": final_user_content},
                 ]
                 final_answer = self.llm.invoke(messages, max_tokens=600)
                 if final_answer:

@@ -6,6 +6,45 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 
+# ==================== 模型定义 ====================
+# 预定义的模型配置：名称 -> (是否多模态, 默认base_url, 描述)
+AVAILABLE_MODELS: Dict[str, Dict[str, Any]] = {
+    "glm-4.7": {
+        "multimodal": False,
+        "base_url": "https://open.bigmodel.cn/api/paas/v4",
+        "description": "智谱 GLM-4.7 文本模型（默认）",
+    },
+    "glm-4.6v-flash": {
+        "multimodal": True,
+        "base_url": "https://open.bigmodel.cn/api/paas/v4",
+        "description": "智谱 GLM-4.6V-Flash 多模态模型（支持图片理解）",
+    },
+    "deepseek-chat": {
+        "multimodal": False,
+        "base_url": "https://api.deepseek.com",
+        "description": "DeepSeek Chat 文本模型",
+    },
+    "qwen-plus": {
+        "multimodal": False,
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "description": "通义千问 Plus 文本模型",
+    },
+    "qwen-vl-plus": {
+        "multimodal": True,
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "description": "通义千问 VL Plus 多模态模型",
+    },
+}
+
+def is_multimodal_model(model_name: str) -> bool:
+    """判断模型是否支持多模态"""
+    if model_name in AVAILABLE_MODELS:
+        return AVAILABLE_MODELS[model_name].get("multimodal", False)
+    # 启发式判断：模型名包含 v, vl, vision 等关键词
+    lower = model_name.lower()
+    return any(kw in lower for kw in ["vision", "-vl", "-v-", "4v", "4.6v", "4o"])
+
+
 class Config(BaseModel):
     """Code Agent CLI 统一配置类
     
@@ -21,11 +60,18 @@ class Config(BaseModel):
     log_level: str = Field(default="INFO", description="日志级别")
     
     # ==================== LLM 配置 ====================
-    default_model: str = Field(default="gpt-3.5-turbo", description="默认模型")
-    default_provider: str = Field(default="openai", description="默认提供商")
+    default_model: str = Field(default="glm-4.7", description="默认模型")
+    default_provider: str = Field(default="zhipu", description="默认提供商")
     temperature: float = Field(default=0.7, ge=0.0, le=2.0, description="温度参数")
     max_tokens: Optional[int] = Field(default=None, description="最大 token 数")
     llm_timeout: int = Field(default=60, gt=0, description="LLM 请求超时（秒）")
+    
+    # ==================== OCR 配置 ====================
+    ocr_mcp_command: Optional[List[str]] = Field(
+        default=None,
+        description="MCP OCR 服务启动命令，如 ['npx', 'ocr-mcp-server']"
+    )
+    ocr_fallback_local: bool = Field(default=True, description="MCP 失败时是否尝试本地 OCR")
     
     # ==================== Agent 配置 ====================
     max_react_steps: int = Field(default=20, gt=0, le=50, description="ReAct 最大步数")

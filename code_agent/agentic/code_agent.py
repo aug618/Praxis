@@ -4,7 +4,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from agents.react_agent import ReActAgent
 from core.config import Config
@@ -17,6 +17,9 @@ from tools.builtin.terminal_tool import TerminalTool
 from tools.builtin.plan_tool import PlanTool
 from tools.builtin.todo_tool import TodoTool
 from tools.builtin.context_fetch_tool import ContextFetchTool
+from utils.multimodal import image_part_from_path
+from utils.references import parse_references
+from tools.builtin.ocr_tool import extract_text_from_image
 
 
 
@@ -245,20 +248,68 @@ class CodeAgent:
         }
         p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    def run_turn(self, user_input: str) -> str:
+    def run_turn(self, user_input: str, image_paths: Optional[List[str | Path]] = None) -> str:
         """
         执行一轮对话：
-        1. 收集上下文 (笔记、记忆、最近工具输出)
-        2. 构建完整 Prompt
-        3. 运行 ReAct 循环
-        4. 更新历史并持久化
+        1. 解析 @file/@dir 引用
+        2. 收集上下文 (笔记、记忆、最近工具输出)
+        3. 构建完整 Prompt
+        4. 运行 ReAct 循环
+        5. 更新历史并持久化
         """
         # 空输入：提示而不进入 ReAct
         if not user_input.strip():
             return "请提供具体指令或问题。"
 
+        # ========== 解析 @file/@dir 引用 ==========
+        refs = parse_references(user_input, workspace=self.paths.repo_root)
+        
+        # 如果有解析错误，先报告
+        if refs.errors:
+            error_msg = "引用解析警告:\n" + "\n".join(f"- {e}" for e in refs.errors)
+            print(error_msg)
+        
+        # 使用清理后的 query（移除了 @file/@dir 标记）
+        clean_query = refs.clean_query
+        
+        # ========== 根据模型类型处理图片 ==========
+        # 多模态模型 → 图片作为 attachments 直接发送
+        # 文本模型 → 图片走 OCR，提取的文字注入到 context
+        all_attachments: List[dict[str, Any]] = []
+        ocr_results: List[str] = []
+        
+        # 收集所有图片路径
+        all_image_paths: List[Path] = list(refs.image_paths)
+        if image_paths:
+            all_image_paths.extend([Path(p) for p in image_paths])
+        
+        if self.llm.is_multimodal:
+            # 多模态模型：图片作为 attachments
+            all_attachments = list(refs.image_attachments)
+            if image_paths:
+                for p in image_paths:
+                    all_attachments.append(image_part_from_path(p))
+            if all_image_paths:
+                print(f"📷 多模态模式：{len(all_image_paths)} 张图片将直接发送给 LLM")
+        else:
+            # 文本模型：图片走 OCR
+            if all_image_paths:
+                print(f"🔍 文本模式：{len(all_image_paths)} 张图片将通过 OCR 提取文字")
+                mcp_cmd = getattr(self.config, 'ocr_mcp_command', None)
+                for img_path in all_image_paths:
+                    ocr_text = extract_text_from_image(img_path, mcp_server_command=mcp_cmd)
+                    if ocr_text and not ocr_text.startswith("错误") and not ocr_text.startswith("OCR 失败"):
+                        ocr_results.append(f"[OCR 识别: {img_path.name}]\n```\n{ocr_text}\n```")
+                        print(f"  ✓ {img_path.name}: 提取到 {len(ocr_text)} 字符")
+                    else:
+                        ocr_results.append(f"[OCR: {img_path.name}] ⚠️ {ocr_text}")
+                        print(f"  ✗ {img_path.name}: {ocr_text[:50]}...")
+            
+            # 移除 context_blocks 中的图片占位符（因为已经用 OCR 结果替代）
+            refs.context_blocks = [b for b in refs.context_blocks if not b.startswith("[图片:")]
+
         # 闲聊/问候：直接回复，避免 ReAct 的严格格式解析失败，也避免无谓的工具调用。
-        if self._is_chitchat(user_input):
+        if self._is_chitchat(clean_query) and not refs.context_blocks and not all_attachments:
             self.last_direct_reply = True
             reply = "你好！我是 Code Agent，可以帮你按需探索代码仓库、生成补丁并在确认后落盘。你想做什么？（例如：分析项目结构 / 搜索某个类 / 修复一个报错）"
             self.history.append(Message(content=user_input, role="user", timestamp=datetime.now()))
@@ -270,7 +321,7 @@ class CodeAgent:
         self.last_direct_reply = False
 
         # 元请求：回顾最近对话
-        if self._is_history_query(user_input):
+        if self._is_history_query(clean_query) and not refs.context_blocks:
             self.last_direct_reply = True
             reply = self._reply_with_recent_history(limit=6)
             self.history.append(Message(content=user_input, role="user", timestamp=datetime.now()))
@@ -283,7 +334,7 @@ class CodeAgent:
         # 若检测到明显多步骤词汇，向模型追加轻量提示（不强制，只提高倾向）
         multistep_hint = ""
         multi_patterns = ["分步", "步骤", "三步", "计划", "改造", "完成后", "多步", "多步骤"]
-        if any(p in user_input for p in multi_patterns):
+        if any(p in clean_query for p in multi_patterns):
             multistep_hint = "提示：本任务包含多个步骤，先用 todo 记录/更新，再执行；收尾用 todo list 汇总。"
 
         # 构建保底上下文（系统提示 + 对话历史 + 上次工具摘要 + 可选 hint）
@@ -292,15 +343,28 @@ class CodeAgent:
         for packet in self.recent_tool_packets[-3:]:
             tool_summaries.append(packet.content)
         
+        # 如果有 @file/@dir 引用的内容或 OCR 结果，作为额外上下文注入
+        ref_context = ""
+        all_context_parts = []
+        if refs.context_blocks:
+            all_context_parts.extend(refs.context_blocks)
+        if ocr_results:
+            all_context_parts.extend(ocr_results)
+        if all_context_parts:
+            ref_context = "\n\n[用户引用的文件/目录]\n" + "\n\n".join(all_context_parts)
+        
         context_text = self.context_builder.build_base(
-            user_query=user_input,
+            user_query=clean_query + ref_context,
             conversation_history=self.history,
             system_instructions=self.system_prompt + ("\n" + multistep_hint if multistep_hint else ""),
             tool_summaries=tool_summaries if tool_summaries else None,
         )
         
+        # 准备多模态附件
+        attachments: Optional[List[dict[str, Any]]] = all_attachments if all_attachments else None
+        
         # 将拼接好的上下文作为"问题"输入给 ReAct
-        response = self.react.run(context_text, max_tokens=8000)
+        response = self.react.run(context_text, max_tokens=8000, attachments=attachments)
 
         # 收集本轮的工具执行证据 (已在 ReActAgent 内部摘要)
         try:
@@ -332,7 +396,12 @@ class CodeAgent:
             pass
 
         # 更新历史记录 (保留最近 50 条)
-        self.history.append(Message(content=user_input, role="user", timestamp=datetime.now()))
+        # 记录原始输入（包含 @file/@dir 标记，便于回顾）
+        user_for_history = user_input
+        if image_paths:
+            rendered = "\n".join([f"- {str(Path(p))}" for p in image_paths])
+            user_for_history = f"{user_input}\n\n[附加图片]\n{rendered}"
+        self.history.append(Message(content=user_for_history, role="user", timestamp=datetime.now()))
         self.history.append(Message(content=response, role="assistant", timestamp=datetime.now()))
         if len(self.history) > 50:
             self.history = self.history[-50:]

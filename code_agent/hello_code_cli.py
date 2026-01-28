@@ -14,7 +14,7 @@ except Exception:  # pragma: no cover
 
 from core.llm import HelloAgentsLLM
 from core.exceptions import HelloAgentsException
-from core.config import Config
+from core.config import Config, AVAILABLE_MODELS
 from code_agent.agentic import CodeAgent
 from code_agent.executors.apply_patch_executor import ApplyPatchExecutor, PatchApplyError
 from utils.cli_ui import c, hr, PRIMARY, ACCENT, INFO, WARN, ERROR
@@ -108,7 +108,8 @@ def main(argv: list[str] | None = None) -> int:
     print(c(hr("=", 80), INFO))
     print(c("HelloAgents Code Agent CLI", PRIMARY))
     print(c(f"workspace: {repo_root}", INFO))
-    print(c(f"LLM: provider={llm.provider} model={llm.model} base_url={llm.base_url}", INFO))
+    model_type = "多模态" if llm.is_multimodal else "文本"
+    print(c(f"LLM: {llm.model} ({model_type})", INFO))
     print(c(f"state: {Path(config.helloagents_dir).as_posix()}", INFO))
     print(c(hr("=", 80), INFO))
 
@@ -129,6 +130,12 @@ def main(argv: list[str] | None = None) -> int:
     print(c("输入自然语言需求开始；命令：", INFO))
     print(c("  :quit", ACCENT) + c(" 退出", INFO))
     print(c("  :plan <目标>", ACCENT) + c(" 强制生成计划", INFO))
+    print(c("  :model", ACCENT) + c(" 查看/切换模型（多模态模型直接识图，文本模型走 OCR）", INFO))
+    print()
+    print(c("@ 引用语法（多个用逗号/顿号分隔）：", INFO))
+    print(c("  @file(a.py, b.png)", ACCENT) + c(" 引用文件（支持图片、代码等）", INFO))
+    print(c("  @dir(src/, lib/)", ACCENT) + c(" 引用目录（列出结构+关键文件）", INFO))
+    print(c("  示例: @file(main.py, image.png) @dir(src/) 请分析这些代码", INFO))
     while True:
         try:
             user_in = input(c("👤 > ", PRIMARY))
@@ -152,9 +159,62 @@ def main(argv: list[str] | None = None) -> int:
             print(response + "\n")
             continue
 
+        # 模型切换命令
+        if user_in == ":model":
+            model_list = list(AVAILABLE_MODELS.items())
+            
+            # 显示当前模型和可用模型列表
+            model_type = "多模态 📷" if llm.is_multimodal else "文本 📝"
+            print(f"\n当前模型: {c(llm.model, PRIMARY)} ({model_type})")
+            print(f"\n可用模型:")
+            for i, (name, info) in enumerate(model_list, 1):
+                marker = "→ " if name == llm.model else "  "
+                mtype = "多模态" if info["multimodal"] else "文本"
+                print(f"  {marker}[{i}] {c(name, ACCENT)} [{mtype}]")
+            
+            # 交互式选择
+            try:
+                choice = input(c("\n输入数字或模型名切换（回车取消）: ", INFO)).strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                continue
+            
+            if not choice:
+                continue
+            
+            # 解析选择
+            target_model = None
+            if choice.isdigit():
+                idx = int(choice) - 1
+                if 0 <= idx < len(model_list):
+                    target_model = model_list[idx][0]
+                else:
+                    print(c(f"无效序号（范围 1-{len(model_list)}）", ERROR))
+                    continue
+            elif choice in AVAILABLE_MODELS:
+                target_model = choice
+            else:
+                print(c(f"未知模型: {choice}", ERROR))
+                continue
+            
+            if target_model:
+                llm.switch_model(target_model)
+                model_type = "多模态 📷" if llm.is_multimodal else "文本 📝"
+                print(c(f"✓ 已切换到: {target_model} ({model_type})", PRIMARY))
+                if llm.is_multimodal:
+                    print(c("  图片将直接发送给 LLM 进行理解", INFO))
+                else:
+                    print(c("  图片将通过 OCR 提取文字后处理", INFO))
+            continue
+
         # 5. 运行一轮对话（ReAct 可能按需调用终端/笔记/记忆）
+        # @file/@dir 引用会在 CodeAgent.run_turn 内部解析
         try:
             response = agent.run_turn(user_in)
+        except FileNotFoundError as e:
+            print(c(f"文件不存在：{e}", ERROR))
+            print(c("提示：使用 @file(路径) 引用文件，例如 @file(main.py, image.png) 请分析", WARN))
+            continue
         except HelloAgentsException as e:
             print(c(f"LLM 调用失败: {e}", ERROR))
             continue
