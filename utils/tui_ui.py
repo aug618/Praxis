@@ -18,20 +18,20 @@ from pathlib import Path
 TUI_CSS = """
 Screen {
     layout: vertical;
-    background: #1a1a2e;
+    background: #0f1115;
 }
 
 Header {
-    background: #16213e;
-    color: #e94560;
+    background: #141824;
+    color: #e8e8e8;
 }
 
 /* Footer widget removed; we use a minimal footer_bar */
 
 #output {
     height: 1fr;
-    background: #1a1a2e;
-    border: none;
+    background: #0f1115;
+    border: tall #202637;
     padding: 1 2;
     scrollbar-gutter: stable;
 }
@@ -39,63 +39,63 @@ Header {
 #suggestions {
     height: auto;
     max-height: 10;
-    background: #16213e;
-    border: tall #0f3460;
+    background: #141824;
+    border: tall #202637;
     margin: 0 2;
     display: none;
 }
 
 #suggestions > ListItem {
     padding: 0 2;
-    background: #16213e;
+    background: #141824;
 }
 
 #suggestions > ListItem:hover {
-    background: #0f3460;
+    background: #202637;
 }
 
 #suggestions > ListItem.-highlight {
-    background: #e94560;
-    color: #fff;
+    background: #4c7dff;
+    color: #0f1115;
 }
 
 #input_area {
     dock: bottom;
     height: 3;
-    background: #1a1a2e;
+    background: #0f1115;
     width: 1fr;
 }
 
 #input_line_top, #input_line_bottom {
     height: 1;
     /* Textual CSS 不支持 linear-gradient；渐变线由代码用 Rich Text 渲染 */
-    background: #1a1a2e;
+    background: #0f1115;
     width: 1fr;
     content-align: left middle;
 }
 
 #input_row {
     height: 1;
-    background: #1a1a2e;
+    background: #0f1115;
     padding: 0 2;
 }
 
 #input_prompt {
     width: 2;
-    color: #b388ff;
+    color: #7aa2f7;
     text-style: bold;
     content-align: left middle;
 }
 
 #input_bar {
-    background: #1a1a2e;
+    background: #0f1115;
     border: none;
     padding: 0;
     height: 1;
 }
 
 Input {
-    background: #1a1a2e;
+    background: #0f1115;
     border: none;
 }
 
@@ -106,7 +106,7 @@ Input:focus {
 /* Cursor shape is terminal-dependent; we can only style colors here */
 Input > .input--cursor {
     background: #00ffff;
-    color: #1a1a2e;
+    color: #0f1115;
 }
 
 /* footer_bar removed */

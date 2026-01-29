@@ -7,10 +7,12 @@ Styles and utilities are in utils/tui_ui.py.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import contextlib
 import io
 import os
 import re
+import time
 import uuid
 from pathlib import Path
 from typing import Iterable, Optional
@@ -21,6 +23,8 @@ except Exception:  # pragma: no cover
     def load_dotenv(*args, **kwargs):  # type: ignore
         return False
 
+from rich import box
+from rich.panel import Panel
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -55,6 +59,83 @@ def _hr(char: str = "=", width: int = 80) -> str:
     return char * width
 
 
+class _StreamingTUIWriter(io.TextIOBase):
+    """A stdout/stderr-like stream that forwards output to the TUI in near-real-time.
+
+    Why: `RichLog` can only append new lines, so we buffer partial writes and flush
+    on newlines (or when the buffer grows / stalls), to avoid UI freezing and avoid
+    dumping everything at the end.
+    """
+
+    def __init__(self, app: "CodeAgentTUI", kind: str) -> None:
+        super().__init__()
+        self._app = app
+        self._kind = kind  # "stdout" | "stderr"
+        self._buf: str = ""
+        self._last_emit_ts = 0.0
+
+    def writable(self) -> bool:  # pragma: no cover
+        return True
+
+    def isatty(self) -> bool:  # pragma: no cover
+        return False
+
+    def write(self, s: str) -> int:  # type: ignore[override]
+        if not s:
+            return 0
+        self._buf += s
+        self._drain_lines()
+        self._maybe_emit_partial()
+        return len(s)
+
+    def flush(self) -> None:  # type: ignore[override]
+        # Many libraries call flush very frequently (e.g. token streaming).
+        # We treat flush as a "maybe" signal to update, not a hard boundary.
+        self._drain_lines()
+        self._maybe_emit_partial()
+
+    def finish(self) -> None:
+        """Force emit all remaining buffered content (call at turn end)."""
+        self._drain_lines()
+        self._emit(self._buf)
+        self._buf = ""
+
+    def _drain_lines(self) -> None:
+        while "\n" in self._buf:
+            line, rest = self._buf.split("\n", 1)
+            self._buf = rest
+            self._emit(line)
+
+    def _maybe_emit_partial(self) -> None:
+        if not self._buf:
+            return
+        now = time.time()
+        # Emit partial buffer only if it is large or has been waiting for a while.
+        if len(self._buf) >= 800 or (now - self._last_emit_ts) >= 1.0:
+            self._emit(self._buf)
+            self._buf = ""
+
+    def _emit(self, chunk: str) -> None:
+        if chunk is None:
+            return
+        chunk = _strip_ansi(chunk)
+        if chunk == "":
+            # Keep blank lines (progress separators).
+            payload = ""
+        else:
+            payload = chunk.rstrip("\r")
+        self._last_emit_ts = time.time()
+
+        def _do() -> None:
+            self._app._write_stream(payload, kind=self._kind)
+
+        # If we're inside a background thread, schedule to UI thread.
+        try:
+            self._app.call_from_thread(_do)  # type: ignore[attr-defined]
+        except Exception:
+            _do()
+
+
 class SuggestionItem(ListItem):
     """Custom list item that stores the suggestion value and optional description."""
 
@@ -86,7 +167,7 @@ class CodeAgentTUI(App):
     """Main TUI application for HelloAgents Code Agent."""
 
     CSS = TUI_CSS
-    TITLE = "HelloAgents"
+    TITLE = "神秘奇奶龙--你的code管家"
     ENABLE_COMMAND_PALETTE = False  # 移除右下角 palette 提示
 
     BINDINGS = [
@@ -117,6 +198,7 @@ class CodeAgentTUI(App):
         self._completion_prefix: Optional[str] = None
         self._completion_tag: Optional[str] = None
         self._suggestions: list[str] = []
+        self._busy: bool = False
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -149,29 +231,17 @@ class CodeAgentTUI(App):
                 self.set_timer(0, self._update_input_lines)  # type: ignore[attr-defined]
             except Exception:
                 self._update_input_lines()
-        # 输出文案尽量与 CLI 保持一致（只改变 UI）
-        self._write(_hr("=", 80))
-        self._write("神秘奇奶龙-你的code管家")
-        self._write("")
-        self._write(f"workspace: {self.repo_root}")
-        self._write("")
+        # 输出文案：TUI 更强调可读性（用户能快速定位 user/assistant/过程日志）
+        self._write_rule("欢迎使用：神秘奇奶龙--你的 code 管家")
+        self._write_kv("工作根目录", str(self.repo_root))
         model_type = "多模态" if self.llm.is_multimodal else "文本"
-        self._write(f"当前模型选择: {self.llm.model} ({model_type})")
+        self._write_kv("当前模型", f"{self.llm.model} ({model_type})")
+        self._write_kv("状态保存目录", Path(self.config.helloagents_dir).as_posix())
+        self._write_rule("提示")
+        self._write_dim("输入自然语言需求开始；命令以 / 开头；引用文件/目录用 @（空格分隔）")
+        self._write_dim("回看历史：滚轮 / PgUp / PgDn；输入框会在执行时暂时锁定")
         self._write("")
-        self._write(f"保存状态目录: {Path(self.config.helloagents_dir).as_posix()}")
-        self._write(_hr("=", 80))
 
-        self._write("输入自然语言需求开始,以下是命令：")
-        self._write("  /quit 退出")
-        self._write("  /plan <目标> [--save] 强制生成计划（可保存）")
-        self._write("  /model 查看/切换模型（多模态模型直接识图，文本模型走 OCR）")
-        self._write("  /stats [current|last|<session_id>] 查看会话统计")
-        self._write("  /export [current|last|<session_id>] 导出会话信息")
-        self._write("")
-        self._write("@ 引用语法（可多次 @，每次支持补全）：")
-        self._write("  @core/llm.py 引用文件")
-        self._write("  @src/ 引用目录")
-        self._write("  示例: @core/llm.py @utils/ 请分析这些内容")
         # Focus input
         self.query_one("#input_bar", Input).focus()
 
@@ -221,20 +291,112 @@ class CodeAgentTUI(App):
     # Output helpers
     # ============================================================
 
-    def _write(self, text: str, style: str | None = None) -> None:
-        """写入输出区。为保持与 CLI 一致，这里默认不强调样式，只输出文本内容。"""
-        _ = style  # keep signature compatible; ignore styles for CLI-aligned output
+    def _write(self, text: str, style: str | None = None, *, markup: bool = False) -> None:
+        """写入输出区。"""
         output = self.query_one("#output", RichLog)
-        output.write(Text(text if text is not None else ""))
+        if markup:
+            output.write(Text.from_markup(text if text is not None else "", style=style))
+        else:
+            output.write(Text(text if text is not None else "", style=style))
+
+    def _write_rule(self, title: str) -> None:
+        self.query_one("#output", RichLog).write(
+            Panel(
+                Text(title, style="bold"),
+                box=box.ROUNDED,
+                border_style="#202637",
+                padding=(0, 1),
+            )
+        )
+
+    def _write_kv(self, key: str, value: str) -> None:
+        t = Text()
+        t.append(f"{key}: ", style="bold #7aa2f7")
+        t.append(value, style="#e8e8e8")
+        self.query_one("#output", RichLog).write(t)
+
+    def _write_dim(self, text: str) -> None:
+        self._write(text, style="dim")
+
+    def _write_user_message(self, user_in: str) -> None:
+        # Highlight @references inside user text.
+        t = Text()
+        for part in user_in.split(" "):
+            if part.startswith("@"):
+                t.append(part, style="bold #7aa2f7")
+            else:
+                t.append(part)
+            t.append(" ")
+        # rich.text.Text.rstrip() 是原地修改并返回 None
+        t.rstrip()
+        ts = time.strftime("%H:%M:%S")
+        self.query_one("#output", RichLog).write(
+            Panel(
+                t,
+                title=f"😅 user · #{self.turns} · {ts}",
+                title_align="left",
+                box=box.ROUNDED,
+                border_style="#4FC3F7",
+                padding=(0, 1),
+            )
+        )
+
+    def _write_assistant_message(self, text: str) -> None:
+        ts = time.strftime("%H:%M:%S")
+        self.query_one("#output", RichLog).write(
+            Panel(
+                Text(text or ""),
+                title=f"🤖 assistant · {ts}",
+                title_align="left",
+                box=box.ROUNDED,
+                border_style="#E94560",
+                padding=(0, 1),
+            )
+        )
 
     def _write_success(self, text: str) -> None:
-        self._write(text)
+        self._write(text, style="bold green")
 
     def _write_warning(self, text: str) -> None:
-        self._write(text)
+        self._write(text, style="bold yellow")
 
     def _write_error(self, text: str) -> None:
-        self._write(text)
+        self._write(text, style="bold red")
+
+    def _write_stream(self, chunk: str, kind: str) -> None:
+        """Write tool/agent intermediate logs with lighter weight."""
+        # Preserve blank lines
+        if chunk == "":
+            self._write("")
+            return
+
+        # Heuristic coloring for common log prefixes.
+        style = "dim"
+        if chunk.startswith("✅") or chunk.startswith("[OK]"):
+            style = "green"
+        elif chunk.startswith("❌") or chunk.startswith("[ERROR]"):
+            style = "red"
+        elif chunk.startswith("⚠️") or chunk.startswith("[WARNING]"):
+            style = "yellow"
+        elif chunk.startswith("🧠"):
+            style = "#bb9af7"
+        elif chunk.startswith("🔍") or chunk.startswith("📷"):
+            style = "#7aa2f7"
+
+        prefix = "· " if kind == "stdout" else "‼ "
+        self._write(prefix + chunk, style=style)
+
+    def _set_busy(self, busy: bool) -> None:
+        self._busy = busy
+        input_widget = self.query_one("#input_bar", Input)
+        input_widget.disabled = busy
+        prompt = self.query_one("#input_prompt", Static)
+        prompt.update("⏳" if busy else ">")
+        try:
+            header = self.query_one(Header)
+            header.sub_title = "处理中…（过程日志会实时输出）" if busy else ""
+        except Exception:
+            pass
 
     # ============================================================
     # Path auto-completion
@@ -410,9 +572,11 @@ class CodeAgentTUI(App):
             self.query_one("#input_bar", Input).focus()
 
     def on_input_changed(self, event: Input.Changed) -> None:
+        if self._busy:
+            return
         self._update_suggestions(event.value)
 
-    def on_input_submitted(self, event: Input.Submitted) -> None:
+    async def on_input_submitted(self, event: Input.Submitted) -> None:
         # First check if suggestions are visible and should be applied
         suggestions_view = self.query_one("#suggestions", ListView)
         if suggestions_view.display and self._suggestions:
@@ -464,8 +628,8 @@ class CodeAgentTUI(App):
 
         self.turns += 1
         self._write("")
-        self._write(f" 😅(你想干嘛?): {user_in}")
-        self._run_turn(user_in)
+        self._write_user_message(user_in)
+        await self._run_turn_async(user_in)
 
     # ============================================================
     # Command handlers
@@ -613,34 +777,47 @@ class CodeAgentTUI(App):
     # Agent interaction
     # ============================================================
 
-    def _run_turn(self, user_in: str) -> None:
-        buf_out = io.StringIO()
-        buf_err = io.StringIO()
+    async def _run_turn_async(self, user_in: str) -> None:
+        """Run one agent turn without blocking the UI.
+
+        - The agent runs in a background thread.
+        - stdout/stderr are streamed into the output panel.
+        - At the end, we render the assistant final message in a readable panel.
+        """
+        self._set_busy(True)
+        stream_out = _StreamingTUIWriter(self, kind="stdout")
+        stream_err = _StreamingTUIWriter(self, kind="stderr")
+
+        def _run() -> str:
+            with contextlib.redirect_stdout(stream_out), contextlib.redirect_stderr(stream_err):
+                return self.agent.run_turn(user_in)
+
         try:
-            with contextlib.redirect_stdout(buf_out), contextlib.redirect_stderr(buf_err):
-                response = self.agent.run_turn(user_in)
+            response = await asyncio.to_thread(_run)
         except FileNotFoundError as e:
-            captured = _strip_ansi((buf_out.getvalue() + "\n" + buf_err.getvalue()).strip())
-            if captured:
-                self._write(captured)
-            self._write(f"文件不存在：{e}")
-            self._write("提示：使用 @ 引用文件/目录，例如 @main.py @src/ 请分析")
+            stream_out.finish()
+            stream_err.finish()
+            self._write_error(f"文件不存在：{e}")
+            self._write_dim("提示：使用 @ 引用文件/目录，例如 @main.py @src/ 请分析")
             return
         except HelloAgentsException as e:
-            captured = _strip_ansi((buf_out.getvalue() + "\n" + buf_err.getvalue()).strip())
-            if captured:
-                self._write(captured)
-            self._write(f"LLM 调用失败: {e}")
+            stream_out.finish()
+            stream_err.finish()
+            self._write_error(f"LLM 调用失败: {e}")
             return
         finally:
-            captured = _strip_ansi((buf_out.getvalue() + "\n" + buf_err.getvalue()).strip())
-            if captured:
-                self._write(captured)
+            # Flush any remaining partial output.
+            try:
+                stream_out.finish()
+                stream_err.finish()
+            except Exception:
+                pass
+            self._set_busy(False)
 
+        # Render the assistant's final answer (high-contrast, easy to scan).
         if getattr(self.agent, "last_direct_reply", False):
             self._write("")
-            self._write("🤖 assistant")
-            self._write(response)
+            self._write_assistant_message(response)
 
         patch_text = extract_patch(response)
         if not patch_text:
