@@ -151,6 +151,20 @@ def _summarize_session(events: list[dict]) -> dict:
     return stats
 
 
+def _export_session(session_id: str, events: list[dict], export_dir: Path) -> Path:
+    export_dir.mkdir(parents=True, exist_ok=True)
+    summary = _summarize_session(events)
+    payload = {
+        "session_id": session_id,
+        "summary": summary,
+        "events": events,
+    }
+    export_path = export_dir / f"session_{session_id}.json"
+    with export_path.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    return export_path
+
+
 def main(argv: list[str] | None = None) -> int:
     """
     CLI 入口点。
@@ -205,10 +219,13 @@ def main(argv: list[str] | None = None) -> int:
 
     print(c(hr("=", 80), INFO))
     print(c("神秘奇奶龙-你的code管家", PRIMARY))
+    print()
     print(c(f"workspace: {repo_root}", INFO))
+    print()
     model_type = "多模态" if llm.is_multimodal else "文本"
     print(c(f"当前模型选择: {llm.model} ({model_type})", INFO))
-    print(c(f"state: {Path(config.helloagents_dir).as_posix()}", INFO))
+    print()
+    print(c(f"保存状态目录: {Path(config.helloagents_dir).as_posix()}", INFO))
     print(c(hr("=", 80), INFO))
 
     # Optional preflight to surface auth issues early.
@@ -226,11 +243,12 @@ def main(argv: list[str] | None = None) -> int:
     patch_executor = ApplyPatchExecutor(repo_root=repo_root)
 
     # 4. 进入交互循环
-    print(c("输入自然语言需求开始；命令：", INFO))
-    print(c("  :quit", ACCENT) + c(" 退出", INFO))
-    print(c("  :plan <目标>", ACCENT) + c(" 强制生成计划", INFO))
-    print(c("  :model", ACCENT) + c(" 查看/切换模型（多模态模型直接识图，文本模型走 OCR）", INFO))
-    print(c("  :stats [current|last|<session_id>]", ACCENT) + c(" 查看会话统计", INFO))
+    print(c("输入自然语言需求开始,以下是命令：", INFO))
+    print(c("  /quit", ACCENT) + c(" 退出", INFO))
+    print(c("  /plan <目标> [--save]", ACCENT) + c(" 强制生成计划（可保存）", INFO))
+    print(c("  /model", ACCENT) + c(" 查看/切换模型（多模态模型直接识图，文本模型走 OCR）", INFO))
+    print(c("  /stats [current|last|<session_id>]", ACCENT) + c(" 查看会话统计", INFO))
+    print(c("  /export [current|last|<session_id>]", ACCENT) + c(" 导出会话信息", INFO))
     print()
     print(c("@ 引用语法（多个用逗号/顿号分隔）：", INFO))
     print(c("  @file(a.py, b.png)", ACCENT) + c(" 引用文件（支持图片、代码等）", INFO))
@@ -239,7 +257,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         while True:
             try:
-                user_in = input(c("👤 > ", PRIMARY))
+                user_in = input(c(" 😅(你想干嘛?): ", PRIMARY))
             except (EOFError, KeyboardInterrupt):
                 print("\n" + c("电脑没油了，下次再见", INFO))
                 _end_session("user_exit", 0)
@@ -252,12 +270,13 @@ def main(argv: list[str] | None = None) -> int:
                 print(c("请提供具体指令或问题。", WARN))
                 continue
             turns += 1
-            if user_in in {":q", ":quit", "quit", "exit"}:
-                print(c("bye", INFO))
+            if user_in in {"/q", "/quit", "quit", "exit"}:
+                print()
+                print(c("没钱充token了，下次再见", INFO))
                 _end_session("user_exit", 0)
                 return 0
-            if user_in.startswith(":stats"):
-                arg = user_in[len(":stats"):].strip()
+            if user_in.startswith("/stats"):
+                arg = user_in[len("/stats"):].strip()
                 log_dir = os.getenv("CODE_AGENT_LOG_DIR") or str(Path(".helloagents") / "logs")
                 log_path = Path(log_dir) / "events.jsonl"
                 events = _load_events(log_path)
@@ -303,15 +322,64 @@ def main(argv: list[str] | None = None) -> int:
                     print(c(f"tokens: prompt={stats['prompt_tokens']} completion={stats['completion_tokens']}", INFO))
                 print(c(f"tokens_est: prompt≈{stats['prompt_tokens_est']} completion≈{stats['completion_tokens_est']}", INFO))
                 continue
-            if user_in.startswith(":plan"):
-                goal = user_in[len(":plan") :].strip() or "请为当前任务生成一个可执行计划"
+            if user_in.startswith("/export"):
+                arg = user_in[len("/export"):].strip()
+                log_dir = os.getenv("CODE_AGENT_LOG_DIR") or str(Path(".helloagents") / "logs")
+                log_path = Path(log_dir) / "events.jsonl"
+                events = _load_events(log_path)
+                if not events:
+                    print(c("暂无日志数据。", WARN))
+                    continue
+
+                current_id = os.getenv("CODE_AGENT_SESSION_ID")
+                target_id = None
+                if arg == "current" or not arg:
+                    target_id = current_id
+                elif arg == "last":
+                    for e in reversed(events):
+                        if e.get("type") == "session_end":
+                            target_id = e.get("session_id")
+                            break
+                else:
+                    target_id = arg
+
+                if not target_id:
+                    print(c("未找到目标会话。", WARN))
+                    continue
+
+                session_events = [e for e in events if e.get("session_id") == target_id]
+                if not session_events:
+                    print(c(f"未找到会话: {target_id}", WARN))
+                    continue
+
+                export_dir = Path(log_dir).parent / "exports"
+                export_path = _export_session(target_id, session_events, export_dir)
+                print(c("✅ 已导出会话信息", PRIMARY))
+                print(c(f"path: {export_path}", INFO))
+                continue
+            if user_in.startswith("/plan"):
+                raw = user_in[len("/plan") :].strip()
+                save_plan = False
+                if "--save" in raw:
+                    save_plan = True
+                    raw = raw.replace("--save", "").strip()
+                goal = raw or "请为当前任务生成一个可执行计划"
                 response = agent.registry.execute_tool("plan", goal)
                 print("\n" + c("🤖 plan", PRIMARY))
                 print(response + "\n")
+                if save_plan:
+                    agent.note_tool.run({
+                        "action": "create",
+                        "title": "Plan",
+                        "content": f"Goal:\n{goal}\n\nPlan:\n\n{response}",
+                        "note_type": "plan",
+                        "tags": [project, "plan"],
+                    })
+                    print(c("✅ 已保存到 notes", INFO))
                 continue
 
             # 模型切换命令
-            if user_in == ":model":
+            if user_in == "/model":
                 model_list = list(AVAILABLE_MODELS.items())
                 
                 # 显示当前模型和可用模型列表

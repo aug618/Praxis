@@ -1,12 +1,11 @@
-"""Reference parser for @file() and @dir() syntax.
+"""Reference parser for @ syntax.
 
 Supports:
-- @file(path/to/file.py) - single file reference
-- @file(a.py, b.py, c.png) - multiple files in one reference (comma/、separated)
-- @file(image.png) - image file (becomes multimodal attachment)
-- @dir(src/) - directory reference (lists structure + key files)
-- @dir(src/, lib/) - multiple directories
-- Multiple references: @file(a.py) @dir(lib/)
+- @path/to/file.py - file reference (simplified syntax)
+- @src/ - directory reference (trailing slash)
+- @file(path) - legacy file syntax (still supported)
+- @dir(path) - legacy dir syntax (still supported)
+- Multiple references: @core/llm.py @utils/ 比较这两个
 
 Image extensions are treated as multimodal attachments.
 Text/code files are injected into context.
@@ -57,10 +56,14 @@ def parse_references(
     workspace: str | Path,
 ) -> ParsedReferences:
     """
-    Parse @file() and @dir() references from user input.
+    Parse @ references from user input.
+    
+    Supports two syntaxes:
+    1. Simplified: @path/to/file.py or @src/ (directory with trailing /)
+    2. Legacy: @file(path) or @dir(path)
     
     Args:
-        user_input: Raw user input with potential @file/@dir references
+        user_input: Raw user input with potential @ references
         workspace: Base directory for resolving relative paths
         
     Returns:
@@ -69,34 +72,22 @@ def parse_references(
     workspace = Path(workspace).resolve()
     result = ParsedReferences(clean_query=user_input)
     
-    # Pattern: @file(paths) or @dir(paths)
-    # paths can be: single path, or multiple comma/、separated paths
-    # Examples: @file(a.py), @file(a.py, b.py), @file(a.py、b.png), @dir(src/, lib/)
-    pattern = r'@(file|dir)\(([^)]+)\)'
+    # Track all matched spans to remove later
+    remove_spans: List[Tuple[int, int]] = []
     
-    matches = list(re.finditer(pattern, user_input, re.IGNORECASE))
-    
-    if not matches:
-        return result
-    
-    # Process each reference
-    for match in matches:
-        ref_type = match.group(1).lower()  # 'file' or 'dir'
+    # Pattern 1: Legacy @file(paths) or @dir(paths)
+    legacy_pattern = r'@(file|dir)\(([^)]+)\)'
+    for match in re.finditer(legacy_pattern, user_input, re.IGNORECASE):
+        remove_spans.append((match.start(), match.end()))
+        ref_type = match.group(1).lower()
         paths_str = match.group(2).strip()
-        
-        # Split by comma or Chinese comma (、)
-        # Also handle spaces around separators
         paths = _split_paths(paths_str)
         
         for ref_path in paths:
             ref_path = ref_path.strip().strip("\"'")
             if not ref_path:
                 continue
-                
-            # Resolve path relative to workspace
             full_path = (workspace / ref_path).resolve()
-            
-            # Security: ensure path is within workspace
             try:
                 full_path.relative_to(workspace)
             except ValueError:
@@ -105,12 +96,46 @@ def parse_references(
             
             if ref_type == "file":
                 _process_file(full_path, ref_path, result)
-            else:  # dir
+            else:
                 _process_dir(full_path, ref_path, workspace, result)
     
-    # Remove all @file/@dir references from the query
-    clean = re.sub(pattern, '', user_input, flags=re.IGNORECASE)
-    result.clean_query = clean.strip()
+    # Pattern 2: Simplified @path (not followed by file/dir parenthesis)
+    # Match @followed by path characters until whitespace or end
+    # Path can contain: letters, numbers, /, ., _, -, but not @
+    simple_pattern = r'@(?!file\(|dir\()([a-zA-Z0-9_./-]+)'
+    for match in re.finditer(simple_pattern, user_input):
+        # Skip if this overlaps with a legacy match
+        start, end = match.start(), match.end()
+        if any(s <= start < e or s < end <= e for s, e in remove_spans):
+            continue
+        
+        remove_spans.append((start, end))
+        ref_path = match.group(1).strip()
+        if not ref_path:
+            continue
+        
+        full_path = (workspace / ref_path).resolve()
+        try:
+            full_path.relative_to(workspace)
+        except ValueError:
+            result.errors.append(f"路径不在工作目录内: {ref_path}")
+            continue
+        
+        # Auto-detect: directory (ends with / or is a dir) vs file
+        if ref_path.endswith("/") or full_path.is_dir():
+            _process_dir(full_path, ref_path, workspace, result)
+        else:
+            _process_file(full_path, ref_path, result)
+    
+    # Remove all references from the query
+    # Sort spans in reverse order to remove from end first
+    remove_spans.sort(reverse=True)
+    clean = user_input
+    for start, end in remove_spans:
+        clean = clean[:start] + clean[end:]
+    
+    # Clean up extra whitespace
+    result.clean_query = " ".join(clean.split()).strip()
     
     # If query is empty after removing references, provide a default
     if not result.clean_query:

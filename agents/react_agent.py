@@ -159,7 +159,7 @@ class ReActAgent(Agent):
 
         while current_step < self.max_steps:
             current_step += 1
-            print(c(f"\n--- Step {current_step}/{self.max_steps} ---", ACCENT))
+            print(c(f"\n--- 当轮需求所处步骤：{current_step}/{self.max_steps} （单次需求最多执行{self.max_steps}步） ---", ACCENT))
             
             # 构建提示词
             tools_desc = self.tool_registry.get_tools_description()
@@ -175,7 +175,7 @@ class ReActAgent(Agent):
             if attachments:
                 user_content = [{"type": "text", "text": prompt}, *list(attachments)]
             messages = [{"role": "user", "content": user_content}]
-            spinner = Spinner("Thinking…")
+            spinner = Spinner("奶浓正在思考...")
             spinner.start()
             response_text = self.llm.invoke(messages, **kwargs)
             spinner.stop()
@@ -188,7 +188,10 @@ class ReActAgent(Agent):
             thought, action = self._parse_output(response_text)
             
             if thought:
-                print(c("Thought:", INFO), thought)
+                print()
+                print(c("奶浓的思考:", INFO), thought)
+                print()
+
             
             if not action:
                 # One forced retry: ask model to rewrite in strict format (helps for greetings / bilingual models)
@@ -221,7 +224,8 @@ class ReActAgent(Agent):
             # 检查是否完成
             if action.startswith("Finish"):
                 final_answer = self._parse_action_input(action)
-                print(c("Finish:", PRIMARY))
+                print()
+                print(c("奶浓认为是这样的:", PRIMARY))
                 print(final_answer)
                 
                 # 保存到历史记录
@@ -236,7 +240,7 @@ class ReActAgent(Agent):
                 self.current_history.append("Observation: 无效的Action格式，请检查。")
                 continue
             
-            log_tool_event(tool_name, tool_input)
+            #log_tool_event(tool_name, tool_input)
             
             # 调用工具
             observation = self.tool_registry.execute_tool(tool_name, tool_input)
@@ -255,7 +259,7 @@ class ReActAgent(Agent):
                     # fall back to raw observation
                     pass
 
-            log_tool_event(f"{tool_name} result", clamp_text(str(observation), limit=6000))
+            #log_tool_event(f"{tool_name} result", clamp_text(str(observation), limit=6000))
 
             # 提前终止：重复相同 action 且无明显进展
             action_sig = f"{tool_name}|{tool_input}".strip()
