@@ -28,6 +28,14 @@ Header {
 
 /* Footer widget removed; we use a minimal footer_bar */
 
+#logo {
+    height: auto;
+    max-height: 100;
+    background: #0f1115;
+    margin: 1 2 0 2;
+    content-align: center middle;
+}
+
 #output {
     height: 1fr;
     background: #0f1115;

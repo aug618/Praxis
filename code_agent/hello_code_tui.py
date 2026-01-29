@@ -24,6 +24,7 @@ except Exception:  # pragma: no cover
         return False
 
 from rich import box
+from rich.align import Align
 from rich.panel import Panel
 from rich.text import Text
 from textual.app import App, ComposeResult
@@ -173,6 +174,7 @@ class CodeAgentTUI(App):
     BINDINGS = [
         Binding("ctrl+c", "quit", "Quit", show=True),
         Binding("ctrl+q", "quit", "Quit", show=False),
+        Binding("ctrl+l", "toggle_logo", "Logo", show=False),
         Binding("tab", "complete", "Complete", show=False),
         Binding("up", "suggestion_up", "Up", show=False),
         Binding("down", "suggestion_down", "Down", show=False),
@@ -201,10 +203,18 @@ class CodeAgentTUI(App):
         self._completion_tag: Optional[str] = None
         self._suggestions: list[str] = []
         self._busy: bool = False
+        self._logo_frames: list[Text] = []
+        self._logo_frame_idx: int = 0
+        self._logo_timer = None
+        self._logo_visibility: str = (os.getenv("CODE_AGENT_LOGO_VISIBILITY", "once").strip().lower() or "once")
+        if self._logo_visibility not in {"always", "once", "never"}:
+            self._logo_visibility = "once"
+        self._logo_splash_timer = None
 
     def compose(self) -> ComposeResult:
         yield Header()
         with Vertical():
+            yield Static("", id="logo")
             yield RichLog(id="output", wrap=True, markup=True)
             yield ListView(id="suggestions")
         with Vertical(id="input_area"):
@@ -233,11 +243,19 @@ class CodeAgentTUI(App):
                 self.set_timer(0, self._update_input_lines)  # type: ignore[attr-defined]
             except Exception:
                 self._update_input_lines()
+
+        # 启动 Logo（像项目 banner 一样，每次启动最开始显示）
+        if self._logo_visibility != "never":
+            self._write_logo()
+            self._maybe_auto_hide_logo()
+        else:
+            self._set_logo_visible(False)
+
         # 输出文案：TUI 更强调可读性（用户能快速定位 user/assistant/过程日志）
         self._write_rule(
             "欢迎使用：神秘奇奶龙--你的 code 管家",
             border_style="#7aa2f7",
-            title_style="bold #7aa2f10",
+            title_style="bold #7aa2f7",
         )
         self._write("")
         self._write_kv("  工作根目录", str(self.repo_root))
@@ -254,6 +272,43 @@ class CodeAgentTUI(App):
 
         # Focus input
         self.query_one("#input_bar", Input).focus()
+
+    def action_toggle_logo(self) -> None:
+        """Toggle logo visibility (Ctrl+L)."""
+        logo = self.query_one("#logo", Static)
+        self._set_logo_visible(not bool(getattr(logo, "display", True)))
+
+    def _set_logo_visible(self, visible: bool) -> None:
+        logo = self.query_one("#logo", Static)
+        logo.display = visible
+        # If hidden, stop animation timer to avoid wasting CPU.
+        if not visible:
+            try:
+                if self._logo_timer is not None:
+                    self._logo_timer.stop()  # type: ignore[attr-defined]
+            except Exception:
+                pass
+            self._logo_timer = None
+
+    def _maybe_auto_hide_logo(self) -> None:
+        """If visibility=once, auto-hide logo after a short splash."""
+        if self._logo_visibility != "once":
+            return
+        sec_s = os.getenv("CODE_AGENT_LOGO_SPLASH_SECONDS", "").strip()
+        try:
+            sec = float(sec_s) if sec_s else 2.0
+        except Exception:
+            sec = 2.0
+        sec = max(0.2, min(10.0, sec))
+
+        def _hide() -> None:
+            self._set_logo_visible(False)
+
+        try:
+            self._logo_splash_timer = self.set_timer(sec, _hide)  # type: ignore[attr-defined]
+        except Exception:
+            # If timers are unavailable, just leave it visible.
+            self._logo_splash_timer = None
 
     def on_resize(self) -> None:
         # Keep gradient lines aligned with terminal width
@@ -324,6 +379,262 @@ class CodeAgentTUI(App):
                 padding=(0, 1),
             )
         )
+
+    def _write_logo(self) -> None:
+        """在启动时输出一个“项目 Logo”。
+
+        优先级：
+        1) 环境变量 `CODE_AGENT_LOGO` 指定的图片路径
+        2) repo 内常见路径（如 test/t.png）
+        3) 兜底：内置 ASCII art
+        """
+
+        def _candidate_paths() -> list[Path]:
+            candidates: list[Path] = []
+            env_logo = os.getenv("CODE_AGENT_LOGO", "").strip()
+            if env_logo:
+                candidates.append(Path(env_logo).expanduser())
+            # common defaults
+            candidates.extend(
+                [
+                    self.repo_root / "assets" / "logo.png",
+                    self.repo_root / "assets" / "logo.jpg",
+                    self.repo_root / "test" / "t.png",
+                ]
+            )
+            return candidates
+
+        def _render_image_to_text(img_rgb, width: int) -> Text | None:
+            try:
+                from PIL import Image  # type: ignore
+            except Exception:
+                return None
+            img = img_rgb
+            if not isinstance(img, Image.Image):
+                return None
+
+            w0, h0 = img.size
+            if w0 <= 0 or h0 <= 0:
+                return None
+
+            # Render with upper-half blocks: each char represents 2 vertical pixels.
+            # We scale height in pixels by ~2 so the final character aspect looks OK.
+            height_px = max(2, int(h0 / w0 * width * 2))
+            if height_px % 2 == 1:
+                height_px += 1
+            img = img.resize((width, height_px))
+            px = img.load()
+            if px is None:
+                return None
+
+            out = Text()
+            for y in range(0, height_px, 2):
+                for x in range(width):
+                    r1, g1, b1 = px[x, y]
+                    r2, g2, b2 = px[x, y + 1]
+                    style = f"#{r1:02x}{g1:02x}{b1:02x} on #{r2:02x}{g2:02x}{b2:02x}"
+                    out.append("▀", style=style)
+                out.append("\n")
+            return out
+
+        def _render_image_to_dots(img_rgb, width_chars: int) -> Text | None:
+            """彩色点阵渲染：把图片压到字符网格，用彩色 '•' 表达像素点。"""
+            try:
+                from PIL import Image  # type: ignore
+            except Exception:
+                return None
+            img = img_rgb
+            if not isinstance(img, Image.Image):
+                return None
+
+            w0, h0 = img.size
+            if w0 <= 0 or h0 <= 0:
+                return None
+
+            width_chars = max(2, int(width_chars))
+            # 字符格通常“高于宽”，用一个经验系数避免看起来被拉长
+            aspect = float(os.getenv("CODE_AGENT_LOGO_DOT_ASPECT", "0.55"))
+            height_chars = max(1, int(h0 / w0 * width_chars * aspect))
+
+            img = img.resize((width_chars, height_chars)).convert("RGB")
+            px = img.load()
+            if px is None:
+                return None
+
+            dot_char = os.getenv("CODE_AGENT_LOGO_DOT_CHAR", "•")
+            out = Text()
+            for y in range(height_chars):
+                for x in range(width_chars):
+                    r, g, b = px[x, y]
+                    out.append(dot_char, style=f"#{r:02x}{g:02x}{b:02x}")
+                out.append("\n")
+            return out
+
+        def _fit_width_no_upscale(w0: int, h0: int, *, mode: str) -> int:
+            """尽量保持原图尺寸：不放大，仅在超出可用区域时等比缩小。
+
+            说明：终端显示是“字符格”，无法真正按原始像素大小展示；这里的“原图尺寸”
+            指尽量少做缩小，只要终端放得下就不缩。
+            """
+            # 可用宽度（字符格）
+            max_w = max(10, (self.size.width or 80) - 8)
+
+            # 默认：尽量给 logo 更多空间（只要终端高度允许）
+            # 也可用环境变量覆盖
+            env_max_h = os.getenv("CODE_AGENT_LOGO_MAX_HEIGHT", "").strip()
+            if env_max_h.isdigit():
+                max_h_lines = max(6, int(env_max_h))
+            else:
+                # 预留若干行给 output/input；剩余尽量给 logo
+                reserved = 14
+                max_h_lines = max(8, min(40, max(8, (self.size.height or 40) - reserved)))
+
+            target_w = min(w0, max_w)  # 不放大
+            target_w = max(2, target_w)
+
+            # 高度约束（可关闭）：不同模式的“每列宽度对应的行数”不同
+            # halfblock: height_lines ≈ h0/w0 * target_w
+            # dot:       height_lines ≈ h0/w0 * target_w * aspect(默认 0.55)
+            disable_h_limit = os.getenv("CODE_AGENT_LOGO_DISABLE_HEIGHT_LIMIT", "").strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "y",
+            }
+            if not disable_h_limit and h0 > 0:
+                if mode == "dot":
+                    try:
+                        aspect = float(os.getenv("CODE_AGENT_LOGO_DOT_ASPECT", "0.55"))
+                    except Exception:
+                        aspect = 0.55
+                    aspect = max(0.2, min(2.0, aspect))
+                    height_lines_per_w = (h0 / w0) * aspect
+                else:
+                    height_lines_per_w = (h0 / w0)
+                if height_lines_per_w > 0:
+                    max_w_by_h = int(max_h_lines / height_lines_per_w)
+                    if max_w_by_h > 0:
+                        target_w = min(target_w, max_w_by_h)
+
+            # 允许强制指定宽度（不推荐过大，可能溢出）
+            env_w = os.getenv("CODE_AGENT_LOGO_WIDTH", "").strip()
+            if env_w.isdigit():
+                forced = int(env_w)
+                if forced > 0:
+                    target_w = min(max_w, forced)
+
+            return max(2, target_w)
+
+        # 如果之前有动画 timer，先停掉
+        try:
+            if self._logo_timer is not None:
+                self._logo_timer.stop()  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        self._logo_timer = None
+        self._logo_frames = []
+        self._logo_frame_idx = 0
+
+        # 三种模式（由环境变量控制）：
+        # - image: 渲染静态图片（即使输入是 gif，也只取首帧）
+        # - gif:   渲染 gif 动图（若输入非动图则退化为 image）
+        # - dot:   彩色点阵（即使输入是 gif，也只取首帧）
+        logo_mode = os.getenv("CODE_AGENT_LOGO_MODE", "image").strip().lower()
+        if logo_mode not in {"image", "gif", "dot"}:
+            logo_mode = "image"
+        animate = os.getenv("CODE_AGENT_LOGO_ANIMATE", "1").strip().lower() not in {"0", "false", "no", "n"}
+
+        def _set_logo(renderable) -> None:
+            # Rich 的居中对齐（配合 #logo 的 content-align 更稳）
+            self.query_one("#logo", Static).update(Align.center(renderable))
+
+        for p in _candidate_paths():
+            if not p.exists() or not p.is_file():
+                continue
+            try:
+                from PIL import Image, ImageSequence  # type: ignore
+            except Exception:
+                break
+
+            try:
+                img = Image.open(p)
+            except Exception:
+                continue
+
+            # 以第一帧尺寸计算目标宽度（尽量保持原图尺寸，不放大）
+            try:
+                w0, h0 = img.size
+                width_chars = _fit_width_no_upscale(int(w0), int(h0), mode=logo_mode)
+            except Exception:
+                width_chars = max(24, min(72, (self.size.width or 80) - 10))
+
+            is_gif = (getattr(img, "format", "") or "").upper() == "GIF"
+            is_animated = bool(getattr(img, "is_animated", False)) or (getattr(img, "n_frames", 1) or 1) > 1
+
+            # 模式2：gif 动图（仅在 logo_mode=gif 时启用；否则一律按静态图处理）
+            if logo_mode == "gif" and animate and (is_gif or is_animated):
+                frames: list[Text] = []
+                duration_ms = int((img.info or {}).get("duration") or 90)
+                duration_ms = max(50, min(500, duration_ms))
+
+                try:
+                    for frame in ImageSequence.Iterator(img):
+                        rgb = frame.convert("RGB")
+                        # gif 模式：默认回到“半块字符渲染”
+                        t = _render_image_to_text(rgb, width=width_chars)
+                        if t is not None:
+                            frames.append(t)
+                        if len(frames) >= 120:  # 防止超长 GIF 过重
+                            break
+                except Exception:
+                    frames = []
+
+                if frames:
+                    self._logo_frames = frames
+                    _set_logo(Panel(frames[0], box=box.ROUNDED, border_style="#202637", padding=(0, 1)))
+
+                    def _advance() -> None:
+                        if not self._logo_frames:
+                            return
+                        self._logo_frame_idx = (self._logo_frame_idx + 1) % len(self._logo_frames)
+                        frame_t = self._logo_frames[self._logo_frame_idx]
+                        _set_logo(Panel(frame_t, box=box.ROUNDED, border_style="#202637", padding=(0, 1)))
+
+                    try:
+                        self._logo_timer = self.set_interval(duration_ms / 1000.0, _advance)  # type: ignore[attr-defined]
+                    except Exception:
+                        self._logo_timer = None
+                    return
+
+            # 模式1/3：静态渲染（image / dot），以及 gif 输入但非 gif 模式时
+            try:
+                rgb0 = img.convert("RGB")
+                if logo_mode == "dot":
+                    t0 = _render_image_to_dots(rgb0, width_chars=width_chars)
+                else:
+                    # image 模式：默认回到“半块字符渲染”
+                    t0 = _render_image_to_text(rgb0, width=width_chars)
+            except Exception:
+                t0 = None
+            if t0 is not None:
+                _set_logo(Panel(t0, box=box.ROUNDED, border_style="#202637", padding=(0, 1)))
+                return
+
+        # Fallback ASCII banner (always works).
+        ascii_logo = Text(
+            "\n".join(
+                [
+                    "   _   _       _           _                 ",
+                    "  | \\ | | __ _(_)_ __   __| | ___  _ __   __ _",
+                    "  |  \\| |/ _` | | '_ \\ / _` |/ _ \\| '_ \\ / _` |",
+                    "  | |\\  | (_| | | | | | (_| | (_) | | | | (_| |",
+                    "  |_| \\_|\\__,_|_|_| |_|\\__,_|\\___/|_| |_|\\__,_|",
+                    "                 奶 龙 · CodeGamer             ",
+                ]
+            ),
+            style="#7aa2f7",
+        )
+        _set_logo(Panel(ascii_logo, box=box.ROUNDED, border_style="#202637", padding=(0, 1)))
 
     def _write_kv(self, key: str, value: str) -> None:
         t = Text()
@@ -593,6 +904,9 @@ class CodeAgentTUI(App):
         self._update_suggestions(event.value)
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
+        # In splash mode, hide logo on first real interaction to free space.
+        if self._logo_visibility == "once":
+            self._set_logo_visible(False)
         # First check if suggestions are visible and should be applied
         suggestions_view = self.query_one("#suggestions", ListView)
         if suggestions_view.display and self._suggestions:
