@@ -86,6 +86,7 @@ class CodeAgent:
 
         self.session_id = f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         self.llm = llm or HelloAgentsLLM()
+        self._quiet = os.getenv("CODE_AGENT_QUIET", "").strip().lower() in {"1", "true", "yes", "y"}
 
         # 初始化工具 (真实实现)
         self.note_tool = NoteTool(workspace=str(self.paths.notes_dir))
@@ -118,15 +119,18 @@ class CodeAgent:
         self.registry.register_tool(self.context_fetch_tool)
 
         # ========== MCP Monitor 工具（系统监控）==========
-        # 优先使用环境变量 MCP_MONITOR_COMMAND，其次尝试默认路径
+        # 优先使用环境变量 MCP_MONITOR_COMMAND。
+        # 默认路径需要显式开启（避免 TUI 启动时刷屏 / 启动额外进程）。
         monitor_cmd: Optional[List[str]] = None
         env_cmd = os.getenv("MCP_MONITOR_COMMAND", "").strip()
         if env_cmd:
             monitor_cmd = shlex.split(env_cmd)
         else:
-            default_bin = self.paths.repo_root / "test" / "mcp-monitor" / "bin" / "mcp-monitor"
-            if default_bin.exists():
-                monitor_cmd = [str(default_bin)]
+            enable_default = os.getenv("CODE_AGENT_ENABLE_MCP_MONITOR", "").strip().lower() in {"1", "true", "yes", "y"}
+            if enable_default:
+                default_bin = self.paths.repo_root / "test" / "mcp-monitor" / "bin" / "mcp-monitor"
+                if default_bin.exists():
+                    monitor_cmd = [str(default_bin)]
 
         if monitor_cmd:
             try:
@@ -137,9 +141,11 @@ class CodeAgent:
                 )
                 for t in monitor_tool.get_expanded_tools():
                     self.registry.register_tool(t)
-                print(f"✅ MCP Monitor 已注册（{len(monitor_tool.get_expanded_tools())} 工具）")
+                if not self._quiet:
+                    print(f"✅ MCP Monitor 已注册（{len(monitor_tool.get_expanded_tools())} 工具）")
             except Exception as e:
-                print(f"⚠️ MCP Monitor 注册失败: {e}")
+                if not self._quiet:
+                    print(f"⚠️ MCP Monitor 注册失败: {e}")
 
         # ========== MCP Playwright 工具（网页自动化）==========
         # 通过环境变量 MCP_PLAYWRIGHT_COMMAND 指定启动命令
@@ -157,9 +163,11 @@ class CodeAgent:
                 )
                 for t in playwright_tool.get_expanded_tools():
                     self.registry.register_tool(t)
-                print(f"✅ MCP Playwright 已注册（{len(playwright_tool.get_expanded_tools())} 工具）")
+                if not self._quiet:
+                    print(f"✅ MCP Playwright 已注册（{len(playwright_tool.get_expanded_tools())} 工具）")
             except Exception as e:
-                print(f"⚠️ MCP Playwright 注册失败: {e}")
+                if not self._quiet:
+                    print(f"⚠️ MCP Playwright 注册失败: {e}")
 
         # 初始化上下文构建器（lazy_fetch=True：只构建保底上下文）
         self.context_builder = ContextBuilder(

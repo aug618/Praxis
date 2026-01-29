@@ -150,6 +150,7 @@ class MCPTool(Tool):
             合并后的环境变量字典
         """
         result_env = {}
+        quiet = os.getenv("CODE_AGENT_QUIET", "").strip().lower() in {"1", "true", "yes", "y"}
 
         # 1. 自动检测（优先级最低）
         if server_command:
@@ -168,7 +169,8 @@ class MCPTool(Tool):
                     value = os.getenv(key)
                     if value:
                         result_env[key] = value
-                        print(f"🔑 自动加载环境变量: {key}")
+                        if not quiet:
+                            print(f"🔑 自动加载环境变量: {key}")
 
         # 2. env_keys指定的环境变量（优先级中等）
         if env_keys:
@@ -176,15 +178,18 @@ class MCPTool(Tool):
                 value = os.getenv(key)
                 if value:
                     result_env[key] = value
-                    print(f"🔑 从env_keys加载环境变量: {key}")
+                    if not quiet:
+                        print(f"🔑 从env_keys加载环境变量: {key}")
                 else:
-                    print(f"⚠️  警告: 环境变量 {key} 未设置")
+                    if not quiet:
+                        print(f"⚠️  警告: 环境变量 {key} 未设置")
 
         # 3. 直接传递的env（优先级最高）
         if env:
             result_env.update(env)
             for key in env.keys():
-                print(f"🔑 使用直接传递的环境变量: {key}")
+                if not quiet:
+                    print(f"🔑 使用直接传递的环境变量: {key}")
 
         return result_env
 

@@ -181,6 +181,8 @@ class CodeAgentTUI(App):
 
     def __init__(self, repo_root: Path, project: str | None = None):
         super().__init__()
+        # TUI 默认静默：避免启动时刷屏（需要时可在环境变量里显式关闭）
+        os.environ.setdefault("CODE_AGENT_QUIET", "1")
         self.repo_root = repo_root.resolve()
         self.project = project or self.repo_root.name
         self.config = Config.from_env()
@@ -232,14 +234,22 @@ class CodeAgentTUI(App):
             except Exception:
                 self._update_input_lines()
         # 输出文案：TUI 更强调可读性（用户能快速定位 user/assistant/过程日志）
-        self._write_rule("欢迎使用：神秘奇奶龙--你的 code 管家")
-        self._write_kv("工作根目录", str(self.repo_root))
+        self._write_rule(
+            "欢迎使用：神秘奇奶龙--你的 code 管家",
+            border_style="#7aa2f7",
+            title_style="bold #7aa2f10",
+        )
+        self._write("")
+        self._write_kv("  工作根目录", str(self.repo_root))
+        self._write("")
         model_type = "多模态" if self.llm.is_multimodal else "文本"
-        self._write_kv("当前模型", f"{self.llm.model} ({model_type})")
-        self._write_kv("状态保存目录", Path(self.config.helloagents_dir).as_posix())
-        self._write_rule("提示")
-        self._write_dim("输入自然语言需求开始；命令以 / 开头；引用文件/目录用 @（空格分隔）")
-        self._write_dim("回看历史：滚轮 / PgUp / PgDn；输入框会在执行时暂时锁定")
+        self._write_kv("  当前模型", f"{self.llm.model} ({model_type})")
+        self._write("")
+        self._write_kv("  状态保存目录", Path(self.config.helloagents_dir).as_posix())
+        self._write("")
+
+        self._write_rule("提示:命令以 / 开头；引用文件、目录用 @（空格分隔）", border_style="#e0af68", title_style="bold #e0af68")
+
         self._write("")
 
         # Focus input
@@ -299,12 +309,18 @@ class CodeAgentTUI(App):
         else:
             output.write(Text(text if text is not None else "", style=style))
 
-    def _write_rule(self, title: str) -> None:
+    def _write_rule(
+        self,
+        title: str,
+        *,
+        border_style: str = "#202637",
+        title_style: str = "bold",
+    ) -> None:
         self.query_one("#output", RichLog).write(
             Panel(
-                Text(title, style="bold"),
+                Text(title, style=title_style),
                 box=box.ROUNDED,
-                border_style="#202637",
+                border_style=border_style,
                 padding=(0, 1),
             )
         )
