@@ -21,6 +21,7 @@ from tools.builtin.todo_tool import TodoTool
 from tools.builtin.context_fetch_tool import ContextFetchTool
 from tools.builtin.protocol_tools import MCPTool
 from tools.builtin.skills_tool import SkillsTool
+from utils.env import env_flag, env_flag_true, env_stripped
 from utils.multimodal import image_part_from_path
 from utils.references import parse_references
 from tools.builtin.ocr_tool import extract_text_from_image
@@ -87,7 +88,7 @@ class CodeAgent:
 
         self.session_id = f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         self.llm = llm or HelloAgentsLLM()
-        self._quiet = os.getenv("CODE_AGENT_QUIET", "").strip().lower() in {"1", "true", "yes", "y"}
+        self._quiet = env_flag("CODE_AGENT_QUIET", default=False)
 
         # 初始化工具 (真实实现)
         self.note_tool = NoteTool(workspace=str(self.paths.notes_dir))
@@ -132,11 +133,11 @@ class CodeAgent:
         # 优先使用环境变量 MCP_MONITOR_COMMAND。
         # 默认路径需要显式开启（避免 TUI 启动时刷屏 / 启动额外进程）。
         monitor_cmd: Optional[List[str]] = None
-        env_cmd = os.getenv("MCP_MONITOR_COMMAND", "").strip()
+        env_cmd = env_stripped("MCP_MONITOR_COMMAND", "")
         if env_cmd:
             monitor_cmd = shlex.split(env_cmd)
         else:
-            enable_default = os.getenv("CODE_AGENT_ENABLE_MCP_MONITOR", "").strip().lower() in {"1", "true", "yes", "y"}
+            enable_default = env_flag("CODE_AGENT_ENABLE_MCP_MONITOR", default=False)
             if enable_default:
                 default_bin = self.paths.repo_root / "test" / "mcp-monitor" / "bin" / "mcp-monitor"
                 if default_bin.exists():
@@ -160,7 +161,7 @@ class CodeAgent:
         # ========== MCP Playwright 工具（网页自动化）==========
         # 通过环境变量 MCP_PLAYWRIGHT_COMMAND 指定启动命令
         playwright_cmd: Optional[List[str]] = None
-        env_playwright = os.getenv("MCP_PLAYWRIGHT_COMMAND", "").strip()
+        env_playwright = env_stripped("MCP_PLAYWRIGHT_COMMAND", "")
         if env_playwright:
             playwright_cmd = shlex.split(env_playwright)
 
@@ -408,7 +409,7 @@ class CodeAgent:
         skills_index = ""
         auto_skill_sop = ""
         try:
-            if os.getenv("CODE_AGENT_ENABLE_SKILLS_INDEX", "1").strip().lower() not in {"0", "false", "no", "n"}:
+            if env_flag_true("CODE_AGENT_ENABLE_SKILLS_INDEX", default=True):
                 skills_tool = self.registry.get_tool("skills")
                 if skills_tool is not None:
                     # 只注入轻量索引（name/description），不加载全文
@@ -418,7 +419,7 @@ class CodeAgent:
 
                     # 外部 skills 发现/安装：用户已经明确表达“去外部找/装 skills”时，
                     # 直接加载 find-skills 的 SOP（仍是按需加载，只对该意图触发）。
-                    if os.getenv("CODE_AGENT_AUTO_LOAD_FIND_SKILLS", "1").strip().lower() not in {"0", "false", "no", "n"}:
+                    if env_flag_true("CODE_AGENT_AUTO_LOAD_FIND_SKILLS", default=True):
                         ql = clean_query.lower()
                         external_intent = any(
                             k in ql

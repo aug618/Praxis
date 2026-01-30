@@ -40,6 +40,7 @@ from core.llm import HelloAgentsLLM
 from code_agent.agentic import CodeAgent
 from code_agent.executors.apply_patch_executor import ApplyPatchExecutor, PatchApplyError
 from context.builder import ContextPacket
+from utils.env import env_flag, env_flag_true, env_lower, env_str, env_stripped
 from utils.observability import log_event
 from utils.tui_ui import (
     TUI_CSS,
@@ -217,13 +218,13 @@ class CodeAgentTUI(App):
         self._logo_frames: list[Text] = []
         self._logo_frame_idx: int = 0
         self._logo_timer = None
-        self._logo_visibility: str = (os.getenv("CODE_AGENT_LOGO_VISIBILITY", "once").strip().lower() or "once")
+        self._logo_visibility: str = env_lower("CODE_AGENT_LOGO_VISIBILITY", "once") or "once"
         if self._logo_visibility not in {"always", "once", "never"}:
             self._logo_visibility = "once"
         self._logo_splash_timer = None
         self._trace_offset: int = 0
         self._trace_path: Path | None = None
-        self._trace_enabled: bool = os.getenv("CODE_AGENT_TRACE_ENABLED", "1").strip().lower() not in {"0", "false", "no", "n"}
+        self._trace_enabled: bool = env_flag_true("CODE_AGENT_TRACE_ENABLED", default=True)
         self._last_verify_command: str | None = None
         self._last_verify_output: str | None = None
         self._last_verify_ok: bool | None = None
@@ -308,7 +309,7 @@ class CodeAgentTUI(App):
         trace.display = not bool(getattr(trace, "display", True))
 
     def _init_trace_timeline(self) -> None:
-        log_dir = os.getenv("CODE_AGENT_LOG_DIR") or str(self.repo_root / ".helloagents" / "logs")
+        log_dir = env_str("CODE_AGENT_LOG_DIR") or str(self.repo_root / ".helloagents" / "logs")
         self._trace_path = (Path(log_dir).expanduser().resolve() / "events.jsonl")
         self._trace_offset = 0
         trace = self.query_one("#trace", RichLog)
@@ -412,7 +413,7 @@ class CodeAgentTUI(App):
         """If visibility=once, auto-hide logo after a short splash."""
         if self._logo_visibility != "once":
             return
-        sec_s = os.getenv("CODE_AGENT_LOGO_SPLASH_SECONDS", "").strip()
+        sec_s = env_stripped("CODE_AGENT_LOGO_SPLASH_SECONDS", "")
         try:
             sec = float(sec_s) if sec_s else 2.0
         except Exception:
@@ -508,7 +509,7 @@ class CodeAgentTUI(App):
 
         def _candidate_paths() -> list[Path]:
             candidates: list[Path] = []
-            env_logo = os.getenv("CODE_AGENT_LOGO", "").strip()
+            env_logo = env_stripped("CODE_AGENT_LOGO", "")
             if env_logo:
                 candidates.append(Path(env_logo).expanduser())
             # common defaults
@@ -570,7 +571,7 @@ class CodeAgentTUI(App):
 
             width_chars = max(2, int(width_chars))
             # 字符格通常“高于宽”，用一个经验系数避免看起来被拉长
-            aspect = float(os.getenv("CODE_AGENT_LOGO_DOT_ASPECT", "0.55"))
+            aspect = float(env_str("CODE_AGENT_LOGO_DOT_ASPECT", "0.55"))
             height_chars = max(1, int(h0 / w0 * width_chars * aspect))
 
             img = img.resize((width_chars, height_chars)).convert("RGB")
@@ -578,7 +579,7 @@ class CodeAgentTUI(App):
             if px is None:
                 return None
 
-            dot_char = os.getenv("CODE_AGENT_LOGO_DOT_CHAR", "•")
+            dot_char = env_str("CODE_AGENT_LOGO_DOT_CHAR", "•")
             out = Text()
             for y in range(height_chars):
                 for x in range(width_chars):
@@ -598,7 +599,7 @@ class CodeAgentTUI(App):
 
             # 默认：尽量给 logo 更多空间（只要终端高度允许）
             # 也可用环境变量覆盖
-            env_max_h = os.getenv("CODE_AGENT_LOGO_MAX_HEIGHT", "").strip()
+            env_max_h = env_stripped("CODE_AGENT_LOGO_MAX_HEIGHT", "")
             if env_max_h.isdigit():
                 max_h_lines = max(6, int(env_max_h))
             else:
@@ -612,16 +613,11 @@ class CodeAgentTUI(App):
             # 高度约束（可关闭）：不同模式的“每列宽度对应的行数”不同
             # halfblock: height_lines ≈ h0/w0 * target_w
             # dot:       height_lines ≈ h0/w0 * target_w * aspect(默认 0.55)
-            disable_h_limit = os.getenv("CODE_AGENT_LOGO_DISABLE_HEIGHT_LIMIT", "").strip().lower() in {
-                "1",
-                "true",
-                "yes",
-                "y",
-            }
+            disable_h_limit = env_flag("CODE_AGENT_LOGO_DISABLE_HEIGHT_LIMIT", default=False)
             if not disable_h_limit and h0 > 0:
                 if mode == "dot":
                     try:
-                        aspect = float(os.getenv("CODE_AGENT_LOGO_DOT_ASPECT", "0.55"))
+                        aspect = float(env_str("CODE_AGENT_LOGO_DOT_ASPECT", "0.55"))
                     except Exception:
                         aspect = 0.55
                     aspect = max(0.2, min(2.0, aspect))
@@ -634,7 +630,7 @@ class CodeAgentTUI(App):
                         target_w = min(target_w, max_w_by_h)
 
             # 允许强制指定宽度（不推荐过大，可能溢出）
-            env_w = os.getenv("CODE_AGENT_LOGO_WIDTH", "").strip()
+            env_w = env_stripped("CODE_AGENT_LOGO_WIDTH", "")
             if env_w.isdigit():
                 forced = int(env_w)
                 if forced > 0:
@@ -656,10 +652,10 @@ class CodeAgentTUI(App):
         # - image: 渲染静态图片（即使输入是 gif，也只取首帧）
         # - gif:   渲染 gif 动图（若输入非动图则退化为 image）
         # - dot:   彩色点阵（即使输入是 gif，也只取首帧）
-        logo_mode = os.getenv("CODE_AGENT_LOGO_MODE", "image").strip().lower()
+        logo_mode = env_lower("CODE_AGENT_LOGO_MODE", "image")
         if logo_mode not in {"image", "gif", "dot"}:
             logo_mode = "image"
-        animate = os.getenv("CODE_AGENT_LOGO_ANIMATE", "1").strip().lower() not in {"0", "false", "no", "n"}
+        animate = env_flag_true("CODE_AGENT_LOGO_ANIMATE", default=True)
 
         def _set_logo(renderable) -> None:
             # Rich 的居中对齐（配合 #logo 的 content-align 更稳）
@@ -1239,14 +1235,14 @@ class CodeAgentTUI(App):
 
     def _handle_stats(self, user_in: str) -> None:
         arg = user_in[len("/stats") :].strip()
-        log_dir = os.getenv("CODE_AGENT_LOG_DIR") or str(Path(".helloagents") / "logs")
+        log_dir = env_str("CODE_AGENT_LOG_DIR") or str(Path(".helloagents") / "logs")
         log_path = Path(log_dir) / "events.jsonl"
         events = load_events(log_path)
         if not events:
             self._write("暂无日志数据。")
             return
 
-        current_id = os.getenv("CODE_AGENT_SESSION_ID")
+        current_id = env_str("CODE_AGENT_SESSION_ID")
         target_id = None
         if arg == "current" or not arg:
             target_id = current_id
@@ -1286,14 +1282,14 @@ class CodeAgentTUI(App):
 
     def _handle_export(self, user_in: str) -> None:
         arg = user_in[len("/export") :].strip()
-        log_dir = os.getenv("CODE_AGENT_LOG_DIR") or str(Path(".helloagents") / "logs")
+        log_dir = env_str("CODE_AGENT_LOG_DIR") or str(Path(".helloagents") / "logs")
         log_path = Path(log_dir) / "events.jsonl"
         events = load_events(log_path)
         if not events:
             self._write("暂无日志数据。")
             return
 
-        current_id = os.getenv("CODE_AGENT_SESSION_ID")
+        current_id = env_str("CODE_AGENT_SESSION_ID")
         target_id = None
         if arg == "current" or not arg:
             target_id = current_id

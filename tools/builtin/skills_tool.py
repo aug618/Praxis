@@ -16,11 +16,11 @@ Where SKILL.md may contain YAML front matter with fields like:
 from __future__ import annotations
 
 from dataclasses import dataclass
-import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ..base import Tool, ToolParameter
+from utils.env import env_stripped
 
 
 @dataclass(frozen=True)
@@ -81,7 +81,8 @@ class SkillsTool(Tool):
             ),
         )
         self.repo_root = Path(repo_root).expanduser().resolve()
-        override = (skills_root or "").strip() or (Path(os.getenv("CODE_AGENT_SKILLS_DIR", "")).as_posix() if os.getenv("CODE_AGENT_SKILLS_DIR") else "")
+        env_skills_dir = env_stripped("CODE_AGENT_SKILLS_DIR", "")
+        override = (skills_root or "").strip() or (Path(env_skills_dir).as_posix() if env_skills_dir else "")
         self.skills_roots: list[Path] = []
         if override:
             self.skills_roots = [Path(override).expanduser().resolve()]

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,13 +10,15 @@ from typing import Any, Dict, Optional
 
 import tiktoken
 
+from utils.env import env_str
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
 def _resolve_log_path() -> Path:
-    log_dir = os.getenv("CODE_AGENT_LOG_DIR")
+    log_dir = env_str("CODE_AGENT_LOG_DIR")
     if log_dir:
         return Path(log_dir).expanduser().resolve() / "events.jsonl"
     # 兜底：当前工作目录下的 .helloagents/logs
@@ -29,7 +30,7 @@ def log_event(event_type: str, data: Dict[str, Any]) -> None:
     try:
         path = _resolve_log_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        session_id = os.getenv("CODE_AGENT_SESSION_ID")
+        session_id = env_str("CODE_AGENT_SESSION_ID")
         base = {"ts": _now_iso(), "type": event_type}
         if session_id:
             base["session_id"] = session_id

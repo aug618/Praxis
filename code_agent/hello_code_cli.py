@@ -2,11 +2,8 @@ from __future__ import annotations
 
 import argparse
 import os
-import re
 import logging
 import uuid
-import json
-from datetime import datetime
 from pathlib import Path
 
 try:
@@ -21,148 +18,12 @@ from core.config import Config, AVAILABLE_MODELS
 from code_agent.agentic import CodeAgent
 from code_agent.executors.apply_patch_executor import ApplyPatchExecutor, PatchApplyError
 from utils.cli_ui import c, hr, PRIMARY, ACCENT, INFO, WARN, ERROR
+from utils.env import env_str
 from utils.observability import log_event
+from utils.patch_utils import extract_patch, normalize_patch, patch_requires_confirmation
+from utils.session_utils import load_events, summarize_session, export_session
 
 
-# 匹配 Codex 风格补丁块（宽松，跨行，允许前导空白或代码围栏）
-PATCH_RE = re.compile(r"\s*\*\*\* Begin Patch[\s\S]*?\*\*\* End Patch", re.MULTILINE)
-# 备用：从 ```patch/```diff 围栏中提取补丁主体
-PATCH_FENCE_RE = re.compile(
-    r"```(?:patch|diff|text)?\s*(\*\*\* Begin Patch[\s\S]*?\*\*\* End Patch)\s*```",
-    re.MULTILINE,
-)
-
-
-def _extract_patch(text: str) -> str | None:
-    """
-    从 LLM 响应文本中提取补丁块。
-    补丁块通常由 *** Begin Patch 和 *** End Patch 包围。
-    """
-    # 优先匹配代码围栏内的补丁
-    m = PATCH_FENCE_RE.search(text)
-    if m:
-        return m.group(1)
-    # 退回普通匹配（允许前导空白）
-    m = PATCH_RE.search(text)
-    return m.group(0).strip() if m else None
-
-
-def _normalize_patch(patch_text: str) -> str:
-    """
-    规范化补丁文本，以宽容处理模型的一些格式错误。
-    - 接受 'Delete File:' / 'Update File:' / 'Add File:' (即使缺少前导 '*** ')
-    - 保持执行器所需的标准 Codex 风格格式。
-    """
-    lines = patch_text.splitlines()
-    out: list[str] = []
-    for line in lines:
-        stripped = line.strip()
-        if stripped.startswith(("Add File:", "Update File:", "Delete File:")) and not stripped.startswith("*** "):
-            out.append("*** " + stripped)
-            continue
-        out.append(line)
-    return "\n".join(out)
-
-
-def _patch_requires_confirmation(patch_text: str) -> bool:
-    """
-    判断补丁是否需要用户确认。
-    策略：
-    - 包含文件删除操作
-    - 涉及文件数量过多 (>= 6)
-    - 变更行数过多 (>= 400)
-    """
-    # MVP: Delete File / too many files / too big => confirm
-    if "*** Delete File:" in patch_text:
-        return True
-    file_ops = patch_text.count("*** Add File:") + patch_text.count("*** Update File:") + patch_text.count("*** Delete File:")
-    if file_ops >= 6:
-        return True
-    changed_lines = 0
-    for line in patch_text.splitlines():
-        if line.startswith("+") or line.startswith("-"):
-            changed_lines += 1
-    return changed_lines >= 400
-
-
-def _load_events(log_path: Path) -> list[dict]:
-    if not log_path.exists():
-        return []
-    events = []
-    with log_path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                events.append(json.loads(line))
-            except Exception:
-                continue
-    return events
-
-
-def _parse_ts(ts: str) -> datetime | None:
-    try:
-        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
-    except Exception:
-        return None
-
-
-def _summarize_session(events: list[dict]) -> dict:
-    stats = {
-        "turns": 0,
-        "tool_calls": 0,
-        "tool_errors": 0,
-        "llm_calls": 0,
-        "llm_errors": 0,
-        "prompt_tokens": 0,
-        "completion_tokens": 0,
-        "prompt_tokens_est": 0,
-        "completion_tokens_est": 0,
-        "duration_ms": None,
-        "start_ts": None,
-        "end_ts": None,
-    }
-    for e in events:
-        et = e.get("type")
-        if et == "session_start":
-            stats["start_ts"] = e.get("ts")
-        elif et == "session_end":
-            stats["end_ts"] = e.get("ts")
-            stats["turns"] = e.get("turns", stats["turns"])
-        elif et == "tool":
-            stats["tool_calls"] += 1
-            if not e.get("ok", True):
-                stats["tool_errors"] += 1
-        elif et == "llm":
-            stats["llm_calls"] += 1
-            if not e.get("ok", True):
-                stats["llm_errors"] += 1
-            stats["prompt_tokens"] += e.get("prompt_tokens") or 0
-            stats["completion_tokens"] += e.get("completion_tokens") or 0
-            stats["prompt_tokens_est"] += e.get("prompt_tokens_est") or 0
-            stats["completion_tokens_est"] += e.get("completion_tokens_est") or 0
-
-    if stats["start_ts"] and stats["end_ts"]:
-        start_dt = _parse_ts(stats["start_ts"])
-        end_dt = _parse_ts(stats["end_ts"])
-        if start_dt and end_dt:
-            stats["duration_ms"] = int((end_dt - start_dt).total_seconds() * 1000)
-    return stats
-
-
-def _export_session(session_id: str, events: list[dict], export_dir: Path) -> Path:
-    export_dir.mkdir(parents=True, exist_ok=True)
-    summary = _summarize_session(events)
-    payload = {
-        "session_id": session_id,
-        "summary": summary,
-        "events": events,
-    }
-    export_path = export_dir / f"session_{session_id}.json"
-    with export_path.open("w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
-    return export_path
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -277,14 +138,14 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             if user_in.startswith("/stats"):
                 arg = user_in[len("/stats"):].strip()
-                log_dir = os.getenv("CODE_AGENT_LOG_DIR") or str(Path(".helloagents") / "logs")
+                log_dir = env_str("CODE_AGENT_LOG_DIR") or str(Path(".helloagents") / "logs")
                 log_path = Path(log_dir) / "events.jsonl"
-                events = _load_events(log_path)
+                events = load_events(log_path)
                 if not events:
                     print(c("暂无日志数据。", WARN))
                     continue
 
-                current_id = os.getenv("CODE_AGENT_SESSION_ID")
+                current_id = env_str("CODE_AGENT_SESSION_ID")
                 target_id = None
                 if arg == "current" or not arg:
                     target_id = current_id
@@ -306,7 +167,7 @@ def main(argv: list[str] | None = None) -> int:
                     print(c(f"未找到会话: {target_id}", WARN))
                     continue
 
-                stats = _summarize_session(session_events)
+                stats = summarize_session(session_events)
                 print(c("📊 会话统计", PRIMARY))
                 print(c(f"session_id: {target_id}", INFO))
                 if stats["start_ts"]:
@@ -324,14 +185,14 @@ def main(argv: list[str] | None = None) -> int:
                 continue
             if user_in.startswith("/export"):
                 arg = user_in[len("/export"):].strip()
-                log_dir = os.getenv("CODE_AGENT_LOG_DIR") or str(Path(".helloagents") / "logs")
+                log_dir = env_str("CODE_AGENT_LOG_DIR") or str(Path(".helloagents") / "logs")
                 log_path = Path(log_dir) / "events.jsonl"
-                events = _load_events(log_path)
+                events = load_events(log_path)
                 if not events:
                     print(c("暂无日志数据。", WARN))
                     continue
 
-                current_id = os.getenv("CODE_AGENT_SESSION_ID")
+                current_id = env_str("CODE_AGENT_SESSION_ID")
                 target_id = None
                 if arg == "current" or not arg:
                     target_id = current_id
@@ -353,7 +214,7 @@ def main(argv: list[str] | None = None) -> int:
                     continue
 
                 export_dir = Path(log_dir).parent / "exports"
-                export_path = _export_session(target_id, session_events, export_dir)
+                export_path = export_session(target_id, session_events, export_dir)
                 print(c("✅ 已导出会话信息", PRIMARY))
                 print(c(f"path: {export_path}", INFO))
                 continue
@@ -457,15 +318,15 @@ def main(argv: list[str] | None = None) -> int:
                 print(response)
             
             # 7. 提取并应用补丁
-            patch_text = _extract_patch(response)
+            patch_text = extract_patch(response)
             if not patch_text:
                 continue
-            patch_text = _normalize_patch(patch_text)
+            patch_text = normalize_patch(patch_text)
             # Ignore empty patch blocks
             if patch_text.strip() == "*** Begin Patch\n*** End Patch":
                 continue
 
-            needs_confirm = _patch_requires_confirmation(patch_text)
+            needs_confirm = patch_requires_confirmation(patch_text)
             if needs_confirm:
                 # If user just answered y/n as the *current* input, treat it as confirmation for this patch.
                 if user_in.strip().lower() in {"n", "no"}:

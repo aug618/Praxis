@@ -9,6 +9,7 @@
 
 from typing import Dict, Any, List, Optional
 from ..base import Tool, ToolParameter
+from utils.env import env_flag
 import os
 
 
@@ -150,7 +151,7 @@ class MCPTool(Tool):
             合并后的环境变量字典
         """
         result_env = {}
-        quiet = os.getenv("CODE_AGENT_QUIET", "").strip().lower() in {"1", "true", "yes", "y"}
+        quiet = env_flag("CODE_AGENT_QUIET", default=False)
 
         # 1. 自动检测（优先级最低）
         if server_command:
