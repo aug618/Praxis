@@ -240,7 +240,8 @@ class CodeAgentTUI(App):
             yield Static("", id="input_line_top")
             with Horizontal(id="input_row"):
                 yield Static(">", id="input_prompt")
-                yield Input(placeholder="输入消息（输入 / 显示命令，输入 @ 引用文件）", id="input_bar")
+                # placeholder 过长 + focus 样式在部分终端会呈现“色块/乱码”，这里缩短文案降低渲染风险
+                yield Input(placeholder="输入消息（/命令，@引用）", id="input_bar")
             yield Static("", id="input_line_bottom")
         # 不显示底部快捷键栏（用户不需要 q quit）
 
@@ -1411,15 +1412,62 @@ class CodeAgentTUI(App):
         self.pending_user_input = user_in
         self._write("")
         self._write_rule("即将应用补丁", border_style="#e0af68", title_style="bold #e0af68")
-        # simple stats
-        add = sum(1 for l in patch_text.splitlines() if l.startswith("+") and not l.startswith("+++"))
-        sub = sum(1 for l in patch_text.splitlines() if l.startswith("-") and not l.startswith("---"))
-        files = []
-        for l in patch_text.splitlines():
-            if l.startswith("*** Update File:") or l.startswith("*** Add File:") or l.startswith("*** Delete File:"):
+        # stats (parse blocks so Add File shows meaningful +lines)
+        lines = patch_text.splitlines()
+        files: list[str] = []
+        created = updated = deleted = 0
+        add = sub = 0
+
+        current_op: str | None = None  # "add" | "update" | "delete"
+        in_hunk = False
+        for l in lines:
+            if l.startswith("*** Add File:"):
                 files.append(l.replace("*** ", "").strip())
+                created += 1
+                current_op = "add"
+                in_hunk = False
+                continue
+            if l.startswith("*** Update File:"):
+                files.append(l.replace("*** ", "").strip())
+                updated += 1
+                current_op = "update"
+                in_hunk = False
+                continue
+            if l.startswith("*** Delete File:"):
+                files.append(l.replace("*** ", "").strip())
+                deleted += 1
+                current_op = "delete"
+                in_hunk = False
+                continue
+            if l.startswith("@@"):
+                in_hunk = True
+                continue
+            if l.strip() == "*** End Patch":
+                break
+
+            # Count changes
+            if current_op == "add":
+                # Add File blocks should be treated as additions even if the model forgot '+' prefixes.
+                if l.startswith("+") and not l.startswith("+++"):
+                    add += 1
+                elif l.startswith(("***", "@@")):
+                    continue
+                else:
+                    # Non-empty content line counts as an added line
+                    if l != "":
+                        add += 1
+                continue
+
+            if current_op == "update" and in_hunk:
+                if l.startswith("+") and not l.startswith("+++"):
+                    add += 1
+                elif l.startswith("-") and not l.startswith("---"):
+                    sub += 1
+                continue
+
         if files:
             self._write_kv("files", ", ".join(files[:8]) + (" ..." if len(files) > 8 else ""))
+        self._write_kv("ops", f"add={created} update={updated} delete={deleted}")
         self._write_kv("diff", f"+{add} / -{sub}")
         self._write_warning("是否应用？(y/n)")
         return
@@ -1443,8 +1491,22 @@ class CodeAgentTUI(App):
             return
 
         # approved: execute tool and feed result back to agent
+        # 对齐 Claude Code/OpenCode：用户点 y 后，这次执行应当真正放行（而不是被工具内部硬白名单再拒绝）
+        # 我们通过向 terminal 工具注入 `user_approved=true` 来实现“本次/一次性 token”。
+        effective_input = tool_input
+        if tool == "terminal":
+            try:
+                obj = json.loads(tool_input)
+                if isinstance(obj, dict):
+                    obj["user_approved"] = True
+                    # 用户已在 UI 二次确认：允许 terminal 将该次执行视为已授权（等价一次性 token）
+                    effective_input = json.dumps(obj, ensure_ascii=False)
+            except Exception:
+                # 非结构化输入保持原样
+                effective_input = tool_input
+
         def _run() -> str:
-            return self.agent.registry.execute_tool(tool, tool_input)
+            return self.agent.registry.execute_tool(tool, effective_input)
 
         try:
             out = await asyncio.to_thread(_run)
@@ -1452,7 +1514,7 @@ class CodeAgentTUI(App):
             self._write(out)
             prompt = (
                 f"用户允许执行工具/命令：{tool}\n"
-                f"输入：{tool_input}\n\n"
+                f"输入：{effective_input}\n\n"
                 f"输出：\n{out}\n\n"
                 "请基于该输出继续下一步（不要重复执行同一命令）。"
             )

@@ -85,6 +85,8 @@ class TerminalTool(Tool):
         'git',
         # 验证/测试（用于 /verify 验证闭环；仍受危险操作检测约束）
         'python', 'python3', 'pytest',
+        # Skills 生态：仅允许 `npx skills ...`（额外校验见 _is_allowed_npx）
+        'npx',
     }
 
     # 常见 shell 元字符（用于检测"组合命令/写盘/子命令"等风险点；不再一刀切禁止）
@@ -170,16 +172,24 @@ class TerminalTool(Tool):
         command = parameters.get("command", "").strip()
         allow_dangerous = bool(parameters.get("allow_dangerous", False))
         shell_mode = bool(parameters.get("shell_mode", self.default_shell_mode))
+        # 由上层 UI 的二次确认注入：对齐 Claude Code/OpenCode/Codex 体验——用户点 y 后本次应当放行
+        user_approved = bool(parameters.get("user_approved", False))
+        effective_allow_dangerous = bool(allow_dangerous or user_approved)
         
         # 基础安全检查：拒绝空命令，防止无意义的系统调用
         if not command:
             return "❌ 命令不能为空"
 
-        # 执行模式选择：根据shell_mode参数决定执行方式
-        # shell_mode=True: 支持管道、重定向等复杂shell语法，但需要更严格的安全检查
-        # shell_mode=False: 使用argv模式，更安全但不支持shell特性
+        # 执行模式选择：
+        # - 如果命令不包含任何 shell 元字符（管道/重定向/命令替换等），即使命令来自默认 shell_mode，
+        #   也降级为 argv 模式执行：更安全，且避免 shell 静态白名单误判（例如 `npx skills ...`）。
+        # - 只有检测到 shell 元字符时才走真正的 shell_mode 执行分支。
         if shell_mode:
-            return self._execute_shell(command, allow_dangerous=allow_dangerous)
+            has_meta = any(self._has_unquoted(command, tok) for tok in self.SHELL_META_TOKENS)
+            if has_meta:
+                return self._execute_shell(command, allow_dangerous=effective_allow_dangerous)
+            # no meta tokens -> treat as argv mode
+            shell_mode = False
         
         # 第二步：命令解析 - 使用shlex进行安全的命令分割，处理引号和转义
         try:
@@ -193,19 +203,37 @@ class TerminalTool(Tool):
         
         base_command = parts[0]
         
-        # 第三步：安全策略检查 - 命令白名单验证
-        # 这是第一道安全防线，确保只能执行预定义的安全命令
-        if base_command not in self.ALLOWED_COMMANDS:
-            return f"❌ 不允许的命令: {base_command}\n允许的命令: {', '.join(sorted(self.ALLOWED_COMMANDS))}"
+        # 第三步：策略层 allow/ask/deny（默认 ask）
+        # - allow：白名单内的安全命令
+        # - deny：明确危险的基础命令（rm/chmod），除非用户已确认（user_approved）/或显式 allow_dangerous
+        # - ask：白名单外的命令，若 user_approved=True 则放行本次（一次性 token）
+        if base_command in self.DANGEROUS_BASE_COMMANDS and not effective_allow_dangerous:
+            return f"❌ 高风险命令 {base_command} 需要人类确认（allow_dangerous=true 或 user_approved=true）"
+
+        if base_command not in self.ALLOWED_COMMANDS and not user_approved:
+            return (
+                f"❌ 命令需要确认后放行（默认 ask）：{base_command}\n"
+                "请在 UI 中确认后重试（UI 会注入 user_approved=true）。"
+            )
+
+        # 对 npx 做进一步限制：只允许 `npx skills ...`
+        if base_command == "npx" and not self._is_allowed_npx(parts):
+            return (
+                "❌ 仅允许执行 `npx skills ...`（用于外部 skills 查找/安装）。\n"
+                "示例：npx skills find react performance"
+            )
 
         # 特殊命令处理：git命令需要额外的子命令安全检查
         if base_command == "git":
-            return self._handle_git(parts, allow_dangerous)
+            # 如果用户已经在 UI 明确放行，则允许更广的 git 行为（仍受路径沙箱与超时限制）
+            if user_approved:
+                return self._execute_argv(parts, allow_dangerous=True)
+            return self._handle_git(parts, effective_allow_dangerous)
 
         # 第四步：危险操作确认机制
         # 当用户明确允许危险操作且启用了确认机制时，进行交互式确认
         # 这为高风险操作提供了最后一道人工确认防线
-        if allow_dangerous and self.confirm_dangerous:
+        if effective_allow_dangerous and self.confirm_dangerous and not user_approved:
             ans = input(f"\n⚠️ 高风险命令：{command}\n允许执行？(y/n)\nconfirm> ").strip().lower()
             if ans not in {"y", "yes"}:
                 return "⛔️ 已取消执行（用户未确认）。"
@@ -215,7 +243,19 @@ class TerminalTool(Tool):
             return self._handle_cd(parts)
         
         # 第五步：执行命令 - 通过所有安全检查后执行命令
-        return self._execute_argv(parts, allow_dangerous=allow_dangerous)
+        return self._execute_argv(parts, allow_dangerous=effective_allow_dangerous)
+
+    def _is_allowed_npx(self, argv: List[str]) -> bool:
+        """仅允许 `npx skills ...`（允许带 npx 自身 flag，如 -y/--yes）。"""
+        if not argv or argv[0] != "npx":
+            return False
+        i = 1
+        # Skip npx flags (best-effort)
+        while i < len(argv) and argv[i].startswith("-"):
+            i += 1
+        if i >= len(argv):
+            return False
+        return argv[i] == "skills"
     
     def get_parameters(self) -> List[ToolParameter]:
         """获取工具参数定义"""
@@ -239,6 +279,12 @@ class TerminalTool(Tool):
                 name="shell_mode",
                 type="boolean",
                 description="是否允许 shell 语义（管道/重定向/多段命令等）。默认继承工具配置。",
+                required=False,
+            ),
+            ToolParameter(
+                name="user_approved",
+                type="boolean",
+                description="是否已由上层 UI 二次确认放行（一次性 token）。通常由 UI 注入，模型不应自行设置。",
                 required=False,
             ),
         ]
@@ -447,6 +493,10 @@ class TerminalTool(Tool):
             
             # 检查基础命令是否在白名单中
             if base not in self.ALLOWED_COMMANDS:
+                return False
+
+            # npx 仅允许 `npx skills ...`
+            if base == "npx" and not self._is_allowed_npx(argv):
                 return False
                 
             # 对git命令进行特殊处理
@@ -657,6 +707,13 @@ class TerminalTool(Tool):
                 except ValueError:
                     # 尝试在工作空间外创建目录，拒绝执行
                     return f"❌ 不允许在工作目录外创建目录: {a}"
+
+        # npx 常会提示“是否安装依赖(y/n)”而阻塞在 stdin。
+        # 我们的工具执行是非交互式的（capture_output），因此默认给 npx 注入 `-y` 以避免卡死。
+        if argv and argv[0] == "npx":
+            has_yes = any(a in {"-y", "--yes"} or a.startswith("--yes=") for a in argv[1:3])
+            if not has_yes:
+                argv = ["npx", "-y"] + argv[1:]
 
         try:
             # 直接执行命令，不通过shell

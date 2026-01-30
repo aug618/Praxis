@@ -403,6 +403,56 @@ class CodeAgent:
         if any(p in clean_query for p in multi_patterns):
             multistep_hint = "提示：本任务包含多个步骤，先用 todo 记录/更新，再执行；收尾用 todo list 汇总。"
 
+        # Skills 索引（渐进式披露的“目录”）：让模型知道本地有哪些 skills，
+        # 从而能在合适时机调用 skills[show] 读取 SKILL.md 的 SOP。
+        skills_index = ""
+        auto_skill_sop = ""
+        try:
+            if os.getenv("CODE_AGENT_ENABLE_SKILLS_INDEX", "1").strip().lower() not in {"0", "false", "no", "n"}:
+                skills_tool = self.registry.get_tool("skills")
+                if skills_tool is not None:
+                    # 只注入轻量索引（name/description），不加载全文
+                    skills_index = skills_tool.run({"action": "list", "limit": 20})
+                    if skills_index and "未找到 skills" not in skills_index:
+                        skills_index = "\n\n[Available Skills]\n" + skills_index + "\n\n用法：先 skills[search] 再 skills[show] 加载具体 SOP。"
+
+                    # 外部 skills 发现/安装：用户已经明确表达“去外部找/装 skills”时，
+                    # 直接加载 find-skills 的 SOP（仍是按需加载，只对该意图触发）。
+                    if os.getenv("CODE_AGENT_AUTO_LOAD_FIND_SKILLS", "1").strip().lower() not in {"0", "false", "no", "n"}:
+                        ql = clean_query.lower()
+                        external_intent = any(
+                            k in ql
+                            for k in [
+                                "外部",
+                                "生态",
+                                "安装skill",
+                                "安装 skills",
+                                "安装 skill",
+                                "找skill",
+                                "找 skills",
+                                "找 skill",
+                                "搜索skill",
+                                "搜索 skills",
+                                "npx skills",
+                                "skills add",
+                                "skills find",
+                            ]
+                        )
+                        if external_intent:
+                            try:
+                                sop = skills_tool.run({"action": "show", "id": "find-skills"})
+                                if sop and "未找到 skill" not in sop:
+                                    auto_skill_sop = (
+                                        "\n\n[Auto-loaded Skill SOP: find-skills]\n"
+                                        + sop
+                                        + "\n\n要求：当用户要在外部生态查找/安装技能时，严格按上面的 SOP 执行。"
+                                    )
+                            except Exception:
+                                auto_skill_sop = ""
+        except Exception:
+            skills_index = ""
+            auto_skill_sop = ""
+
         # 构建保底上下文（系统提示 + 对话历史 + 上次工具摘要 + 可选 hint）
         # 扩展上下文由模型通过 context_fetch 工具按需获取
         tool_summaries = []
@@ -422,7 +472,10 @@ class CodeAgent:
         context_text = self.context_builder.build_base(
             user_query=clean_query + ref_context,
             conversation_history=self.history,
-            system_instructions=self.system_prompt + ("\n" + multistep_hint if multistep_hint else ""),
+            system_instructions=self.system_prompt
+            + (("\n" + multistep_hint) if multistep_hint else "")
+            + (skills_index or "")
+            + (auto_skill_sop or ""),
             tool_summaries=tool_summaries if tool_summaries else None,
         )
         

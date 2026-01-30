@@ -121,6 +121,7 @@ Collapsible {
 Input {
     background: #0f1115;
     border: none;
+    color: #e8e8e8;
 }
 
 Input:focus {
@@ -130,7 +131,21 @@ Input:focus {
 /* Cursor shape is terminal-dependent; we can only style colors here */
 Input > .input--cursor {
     background: #00ffff;
-    color: #0f1115;
+    /* 某些终端/渲染环境可能不会正确绘制 cursor 的 background，
+       若此时把 cursor 字符设为深色，会导致“光标所在字符消失”，看起来像输入乱码/缺字。
+       这里用高对比亮色，保证无论背景是否生效都可见。 */
+    color: #e8e8e8;
+}
+
+/* 在部分终端里，Input 聚焦时的选区/占位符默认样式会显得像“乱码色块”。
+   这里显式设置占位符与选区颜色，避免高对比的黄色块。 */
+Input.-placeholder {
+    color: #565f89;
+}
+
+Input > .input--selection {
+    background: #202637;
+    color: #e8e8e8;
 }
 
 /* footer_bar removed */
