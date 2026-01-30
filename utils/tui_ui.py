@@ -36,12 +36,28 @@ Header {
     content-align: center middle;
 }
 
+#trace {
+    height: auto;
+    max-height: 12;
+    background: #0f1115;
+    border: tall #202637;
+    margin: 0 2;
+    padding: 0 1;
+    display: none;
+}
+
 #output {
     height: 1fr;
     background: #0f1115;
     border: tall #202637;
     padding: 1 2;
     scrollbar-gutter: stable;
+    overflow-y: auto;
+}
+
+Collapsible {
+    border: tall #202637;
+    margin: 0 2;
 }
 
 #suggestions {

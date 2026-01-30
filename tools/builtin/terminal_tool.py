@@ -83,6 +83,8 @@ class TerminalTool(Tool):
         'which', 'whereis',
         # 版本控制（只读子命令会被进一步限制）
         'git',
+        # 验证/测试（用于 /verify 验证闭环；仍受危险操作检测约束）
+        'python', 'python3', 'pytest',
     }
 
     # 常见 shell 元字符（用于检测"组合命令/写盘/子命令"等风险点；不再一刀切禁止）
@@ -503,8 +505,9 @@ class TerminalTool(Tool):
         if not allow_dangerous and not self._shell_all_commands_whitelisted(command):
             return "❌ shell_mode 下检测到非白名单命令/不允许的 git 子命令。需要用户确认后再执行（allow_dangerous=true）"
 
-        # Claude Code-like: pipes are allowed without confirmation; only confirm when it may write/escape/execute dangerous ops.
-        if self.confirm_dangerous and (allow_dangerous or needs_allow):
+        # 在 TUI/Agent 已经完成二次确认的情况下（allow_dangerous=true），
+        # 不再通过 stdin 进行交互式确认，避免后台线程卡死。
+        if self.confirm_dangerous and needs_allow and not allow_dangerous:
             ans = input(f"\n⚠️ 即将执行高风险 shell 命令：{command}\n允许执行？(y/n)\nconfirm> ").strip().lower()
             if ans not in {"y", "yes"}:
                 return "⛔️ 已取消执行（用户未确认）。"

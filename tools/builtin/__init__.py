@@ -19,4 +19,5 @@ __all__ = [
     "LLMJudgeTool",
     "WinRateTool",
     "ContextFetchTool",
+    "SkillsTool",
 ]

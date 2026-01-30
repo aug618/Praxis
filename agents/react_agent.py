@@ -2,6 +2,8 @@
 
 import re
 from typing import Optional, List, Tuple, Callable, Dict, Any
+import json
+import os
 from core.agent import Agent
 from core.llm import HelloAgentsLLM
 from core.config import Config
@@ -239,6 +241,24 @@ class ReActAgent(Agent):
             if not tool_name or tool_input is None:
                 self.current_history.append("Observation: 无效的Action格式，请检查。")
                 continue
+
+            # Cursor-like gating: tools require human confirmation before execution.
+            # Default: confirm terminal commands (can extend via env).
+            confirm_tools = os.getenv("CODE_AGENT_CONFIRM_TOOLS", "terminal").strip()
+            confirm_set = {t.strip() for t in confirm_tools.split(",") if t.strip()}
+            if tool_name in confirm_set:
+                payload = {
+                    "tool": tool_name,
+                    "tool_input": tool_input,
+                    "thought": thought,
+                    "step": current_step,
+                }
+                # Return a special marker that UI can intercept and ask user to confirm/deny.
+                return (
+                    f"需要用户确认后才能执行工具：{tool_name}\n"
+                    f"拟执行输入：{tool_input}\n\n"
+                    f"[[CONFIRM_TOOL]]{json.dumps(payload, ensure_ascii=False)}[[/CONFIRM_TOOL]]"
+                )
             
             #log_tool_event(tool_name, tool_input)
             

@@ -20,6 +20,7 @@ from tools.builtin.plan_tool import PlanTool
 from tools.builtin.todo_tool import TodoTool
 from tools.builtin.context_fetch_tool import ContextFetchTool
 from tools.builtin.protocol_tools import MCPTool
+from tools.builtin.skills_tool import SkillsTool
 from utils.multimodal import image_part_from_path
 from utils.references import parse_references
 from tools.builtin.ocr_tool import extract_text_from_image
@@ -117,6 +118,15 @@ class CodeAgent:
             context_lines=5,
         )
         self.registry.register_tool(self.context_fetch_tool)
+
+        # ========== Skills（.agents/skills）==========
+        # 用于渐进式披露的 SOP/工作流；存在则自动注册
+        try:
+            # SkillsTool 会按 OpenCode/Claude 的标准路径扫描，
+            # 也可用 CODE_AGENT_SKILLS_DIR 覆盖为单一根目录。
+            self.registry.register_tool(SkillsTool(repo_root=str(self.paths.repo_root)))
+        except Exception:
+            pass
 
         # ========== MCP Monitor 工具（系统监控）==========
         # 优先使用环境变量 MCP_MONITOR_COMMAND。

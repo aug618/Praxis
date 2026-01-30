@@ -10,6 +10,7 @@ import argparse
 import asyncio
 import contextlib
 import io
+import json
 import os
 import re
 import time
@@ -29,14 +30,16 @@ from rich.panel import Panel
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
-from textual.widgets import Header, Input, RichLog, ListView, ListItem, Static
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.widget import Widget
+from textual.widgets import Header, Input, RichLog, ListView, ListItem, Static, Collapsible
 
 from core.config import Config, AVAILABLE_MODELS
 from core.exceptions import HelloAgentsException
 from core.llm import HelloAgentsLLM
 from code_agent.agentic import CodeAgent
 from code_agent.executors.apply_patch_executor import ApplyPatchExecutor, PatchApplyError
+from context.builder import ContextPacket
 from utils.observability import log_event
 from utils.tui_ui import (
     TUI_CSS,
@@ -50,6 +53,7 @@ from utils.tui_ui import (
 
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+CONFIRM_TOOL_RE = re.compile(r"\[\[CONFIRM_TOOL\]\]([\s\S]*?)\[\[/CONFIRM_TOOL\]\]")
 
 
 def _strip_ansi(text: str) -> str:
@@ -159,6 +163,8 @@ COMMANDS = [
     ("/plan", "生成执行计划 (--save 保存)"),
     ("/stats", "查看会话统计"),
     ("/export", "导出会话数据"),
+    ("/verify", "运行验证命令（写入 Trace / 证据）"),
+    ("/fix", "基于上次 verify 失败输出继续修复"),
     ("/clear", "清空输出"),
     ("/quit", "退出"),
 ]
@@ -175,6 +181,7 @@ class CodeAgentTUI(App):
         Binding("ctrl+c", "quit", "Quit", show=True),
         Binding("ctrl+q", "quit", "Quit", show=False),
         Binding("ctrl+l", "toggle_logo", "Logo", show=False),
+        Binding("ctrl+t", "toggle_trace", "Trace", show=False),
         Binding("tab", "complete", "Complete", show=False),
         Binding("up", "suggestion_up", "Up", show=False),
         Binding("down", "suggestion_down", "Down", show=False),
@@ -197,6 +204,10 @@ class CodeAgentTUI(App):
 
         self.pending_patch_text: str | None = None
         self.pending_user_input: str | None = None
+        self.pending_tool_name: str | None = None
+        self.pending_tool_input: str | None = None
+        self.pending_tool_user_input: str | None = None
+        self.pending_bang_command: str | None = None
 
         self._completion_start: Optional[int] = None
         self._completion_prefix: Optional[str] = None
@@ -210,12 +221,20 @@ class CodeAgentTUI(App):
         if self._logo_visibility not in {"always", "once", "never"}:
             self._logo_visibility = "once"
         self._logo_splash_timer = None
+        self._trace_offset: int = 0
+        self._trace_path: Path | None = None
+        self._trace_enabled: bool = os.getenv("CODE_AGENT_TRACE_ENABLED", "1").strip().lower() not in {"0", "false", "no", "n"}
+        self._last_verify_command: str | None = None
+        self._last_verify_output: str | None = None
+        self._last_verify_ok: bool | None = None
+        self._thought_log: RichLog | None = None
 
     def compose(self) -> ComposeResult:
         yield Header()
         with Vertical():
             yield Static("", id="logo")
-            yield RichLog(id="output", wrap=True, markup=True)
+            yield RichLog(id="trace", wrap=True, markup=True)
+            yield VerticalScroll(id="output")
             yield ListView(id="suggestions")
         with Vertical(id="input_area"):
             yield Static("", id="input_line_top")
@@ -251,6 +270,10 @@ class CodeAgentTUI(App):
         else:
             self._set_logo_visible(False)
 
+        # Trace timeline：从 events.jsonl 增量读取当前会话事件
+        if self._trace_enabled:
+            self._init_trace_timeline()
+
         # 输出文案：TUI 更强调可读性（用户能快速定位 user/assistant/过程日志）
         self._write_rule(
             "欢迎使用：神秘奇奶龙--你的 code 管家",
@@ -277,6 +300,100 @@ class CodeAgentTUI(App):
         """Toggle logo visibility (Ctrl+L)."""
         logo = self.query_one("#logo", Static)
         self._set_logo_visible(not bool(getattr(logo, "display", True)))
+
+    def action_toggle_trace(self) -> None:
+        """Toggle trace panel visibility (Ctrl+T)."""
+        trace = self.query_one("#trace", RichLog)
+        trace.display = not bool(getattr(trace, "display", True))
+
+    def _init_trace_timeline(self) -> None:
+        log_dir = os.getenv("CODE_AGENT_LOG_DIR") or str(self.repo_root / ".helloagents" / "logs")
+        self._trace_path = (Path(log_dir).expanduser().resolve() / "events.jsonl")
+        self._trace_offset = 0
+        trace = self.query_one("#trace", RichLog)
+        trace.clear()
+        trace.write(Text("Trace Timeline（Ctrl+T 展开/折叠）", style="dim"))
+
+        def _poll() -> None:
+            self._poll_trace_events()
+
+        try:
+            self.set_interval(0.5, _poll)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+    def _poll_trace_events(self) -> None:
+        if not self._trace_path:
+            return
+        try:
+            if not self._trace_path.exists():
+                return
+            with self._trace_path.open("r", encoding="utf-8", errors="ignore") as f:
+                f.seek(self._trace_offset)
+                chunk = f.read()
+                self._trace_offset = f.tell()
+        except Exception:
+            return
+
+        if not chunk:
+            return
+
+        trace = self.query_one("#trace", RichLog)
+        for line in chunk.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                import json as _json
+
+                e = _json.loads(line)
+            except Exception:
+                continue
+            if e.get("session_id") != self.session_id:
+                continue
+
+            et = e.get("type")
+            ts = (e.get("ts") or "")[-12:-1]  # HH:MM:SS.mmm approx
+            if et == "tool":
+                ok = "✓" if e.get("ok", True) else "✗"
+                tool = e.get("tool")
+                ms = e.get("ms")
+                call_id = e.get("tool_call_id") or ""
+                inp = e.get("input_preview") or e.get("input")
+                outp = e.get("output_preview")
+                header = Text(
+                    f"{ts}  {ok} tool  {tool}  ({ms} ms)  #{call_id}",
+                    style="#7aa2f7" if ok == "✓" else "red",
+                )
+                trace.write(header)
+                if inp:
+                    trace.write(Text(f"  in: {str(inp)[:240]}", style="dim"))
+                if outp:
+                    trace.write(Text(f"  out: {str(outp)[:240]}", style="dim"))
+            elif et == "llm":
+                ok = "✓" if e.get("ok", True) else "✗"
+                ms = e.get("ms")
+                model = e.get("model")
+                pt = e.get("prompt_tokens") or e.get("prompt_tokens_est")
+                ct = e.get("completion_tokens") or e.get("completion_tokens_est")
+                trace.write(
+                    Text(
+                        f"{ts}  {ok} llm   {model}  ({ms} ms)  tokens≈{pt}/{ct}",
+                        style="#bb9af7" if ok == "✓" else "red",
+                    )
+                )
+            elif et in {"patch_apply", "verify"}:
+                ok = "✓" if e.get("ok", True) else "✗"
+                ms = e.get("ms")
+                trace.write(
+                    Text(
+                        f"{ts}  {ok} {et}  ({ms} ms)  {e.get('summary','')}",
+                        style="green" if ok == "✓" else "red",
+                    )
+                )
+            else:
+                if et in {"context_base", "session_start", "session_end"}:
+                    trace.write(Text(f"{ts}  • {et}", style="dim"))
 
     def _set_logo_visible(self, visible: bool) -> None:
         logo = self.query_one("#logo", Static)
@@ -357,12 +474,9 @@ class CodeAgentTUI(App):
     # ============================================================
 
     def _write(self, text: str, style: str | None = None, *, markup: bool = False) -> None:
-        """写入输出区。"""
-        output = self.query_one("#output", RichLog)
-        if markup:
-            output.write(Text.from_markup(text if text is not None else "", style=style))
-        else:
-            output.write(Text(text if text is not None else "", style=style))
+        """写入输出区（可交互：支持折叠、点击等）。"""
+        renderable = Text.from_markup(text if text is not None else "", style=style) if markup else Text(text if text is not None else "", style=style)
+        self._mount_output(Static(renderable))
 
     def _write_rule(
         self,
@@ -371,12 +485,14 @@ class CodeAgentTUI(App):
         border_style: str = "#202637",
         title_style: str = "bold",
     ) -> None:
-        self.query_one("#output", RichLog).write(
-            Panel(
-                Text(title, style=title_style),
-                box=box.ROUNDED,
-                border_style=border_style,
-                padding=(0, 1),
+        self._mount_output(
+            Static(
+                Panel(
+                    Text(title, style=title_style),
+                    box=box.ROUNDED,
+                    border_style=border_style,
+                    padding=(0, 1),
+                )
             )
         )
 
@@ -640,7 +756,7 @@ class CodeAgentTUI(App):
         t = Text()
         t.append(f"{key}: ", style="bold #7aa2f7")
         t.append(value, style="#e8e8e8")
-        self.query_one("#output", RichLog).write(t)
+        self._mount_output(Static(t))
 
     def _write_dim(self, text: str) -> None:
         self._write(text, style="dim")
@@ -657,27 +773,31 @@ class CodeAgentTUI(App):
         # rich.text.Text.rstrip() 是原地修改并返回 None
         t.rstrip()
         ts = time.strftime("%H:%M:%S")
-        self.query_one("#output", RichLog).write(
-            Panel(
-                t,
-                title=f"😅 user · #{self.turns} · {ts}",
-                title_align="left",
-                box=box.ROUNDED,
-                border_style="#4FC3F7",
-                padding=(0, 1),
+        self._mount_output(
+            Static(
+                Panel(
+                    t,
+                    title=f"😅 user · #{self.turns} · {ts}",
+                    title_align="left",
+                    box=box.ROUNDED,
+                    border_style="#4FC3F7",
+                    padding=(0, 1),
+                )
             )
         )
 
     def _write_assistant_message(self, text: str) -> None:
         ts = time.strftime("%H:%M:%S")
-        self.query_one("#output", RichLog).write(
-            Panel(
-                Text(text or ""),
-                title=f"🤖 assistant · {ts}",
-                title_align="left",
-                box=box.ROUNDED,
-                border_style="#E94560",
-                padding=(0, 1),
+        self._mount_output(
+            Static(
+                Panel(
+                    Text(text or ""),
+                    title=f"奶浓认为是这样的：· {ts}",
+                    title_align="left",
+                    box=box.ROUNDED,
+                    border_style="#E94560",
+                    padding=(0, 1),
+                )
             )
         )
 
@@ -697,6 +817,11 @@ class CodeAgentTUI(App):
             self._write("")
             return
 
+        # During a turn: stream logs into the collapsible thought panel by default.
+        if self._thought_log is not None:
+            self._thought_log.write(Text(chunk))
+            return
+
         # Heuristic coloring for common log prefixes.
         style = "dim"
         if chunk.startswith("✅") or chunk.startswith("[OK]"):
@@ -712,6 +837,18 @@ class CodeAgentTUI(App):
 
         prefix = "· " if kind == "stdout" else "‼ "
         self._write(prefix + chunk, style=style)
+
+    def _mount_output(self, widget: Widget) -> None:
+        """Mount a widget into the scrollable output area and keep it scrolled to end."""
+        out = self.query_one("#output", VerticalScroll)
+        try:
+            out.mount(widget)
+        except Exception:
+            return
+        try:
+            out.scroll_end(animate=False)
+        except Exception:
+            pass
 
     def _set_busy(self, busy: bool) -> None:
         self._busy = busy
@@ -921,11 +1058,55 @@ class CodeAgentTUI(App):
             self._write("请提供具体指令或问题。")
             return
 
+        # "!" 直通终端：用户自己执行命令，不走 agent
+        if user_in.startswith("!"):
+            cmd = user_in[1:].strip()
+            if not cmd:
+                self._write_warning("用法：!<command>  例如：!pwd")
+                return
+            await self._run_bang_command(cmd, allow_dangerous=False)
+            return
+
+        if self.pending_tool_name and self.pending_tool_input is not None:
+            decision = user_in.lower()
+            tool = self.pending_tool_name
+            tool_input = self.pending_tool_input
+            original = self.pending_tool_user_input or ""
+            # clear first to avoid re-entrancy
+            self.pending_tool_name = None
+            self.pending_tool_input = None
+            self.pending_tool_user_input = None
+            if decision in {"y", "yes"}:
+                # run tool, then feed result back to agent for next decision
+                await self._run_tool_then_continue(tool, tool_input, original, approved=True)
+            else:
+                await self._run_tool_then_continue(tool, tool_input, original, approved=False)
+            return
+
+        # "! 命令" 的危险确认（只针对 bang 模式，不走 agent）
+        if self.pending_bang_command:
+            decision = user_in.lower()
+            cmd = self.pending_bang_command
+            self.pending_bang_command = None
+            if decision in {"y", "yes"}:
+                await self._run_bang_command(cmd, allow_dangerous=True)
+            else:
+                self._write_warning("已取消执行该命令。")
+            return
+
         if self.pending_patch_text:
             if user_in.lower() in {"y", "yes"}:
                 self._apply_patch(self.pending_user_input or "", self.pending_patch_text)
             else:
                 self._write("已取消补丁应用。")
+                # Feed back to agent so it can decide next step without manual re-typing.
+                reject_prompt = (
+                    "用户拒绝应用你生成的补丁。请解释原因/提供替代方案，或生成更小、更安全的补丁。"
+                )
+                self.turns += 1
+                self._write("")
+                self._write_user_message("（系统）用户拒绝应用补丁，继续决策")
+                await self._run_turn_async(reject_prompt)
             self.pending_patch_text = None
             self.pending_user_input = None
             return
@@ -944,6 +1125,34 @@ class CodeAgentTUI(App):
             self._handle_export(user_in)
             return
 
+        if user_in.startswith("/verify"):
+            # /verify <command...>
+            raw = user_in[len("/verify") :].strip()
+            if not raw:
+                self._write_warning("用法：/verify <command>")
+                return
+            await self._run_verify_async(raw)
+            return
+
+        if user_in.startswith("/fix"):
+            # /fix：把上次 verify 的输出作为证据喂给 agent 继续修复
+            if self._last_verify_ok is True:
+                self._write_success("上次 verify 已通过，无需修复。")
+                return
+            if not self._last_verify_command or not self._last_verify_output:
+                self._write_warning("没有可用的 verify 结果。先运行：/verify <command>")
+                return
+            prompt = (
+                "验证命令失败，请根据以下输出修复问题并给出补丁；修复后给出建议的验证命令。\n\n"
+                f"[Verify Command]\n{self._last_verify_command}\n\n"
+                f"[Verify Output]\n{self._last_verify_output}\n"
+            )
+            self.turns += 1
+            self._write("")
+            self._write_user_message("/fix（基于上次 verify 失败继续修复）")
+            await self._run_turn_async(prompt)
+            return
+
         if user_in.startswith("/plan"):
             self._handle_plan(user_in)
             return
@@ -953,7 +1162,13 @@ class CodeAgentTUI(App):
             return
 
         if user_in == "/clear":
-            self.query_one("#output", RichLog).clear()
+            out = self.query_one("#output", VerticalScroll)
+            # Remove all children
+            for child in list(out.children):
+                try:
+                    child.remove()
+                except Exception:
+                    pass
             return
 
         self.turns += 1
@@ -1115,6 +1330,19 @@ class CodeAgentTUI(App):
         - At the end, we render the assistant final message in a readable panel.
         """
         self._set_busy(True)
+
+        # Create a collapsible "thinking" panel for this turn (collapsed by default).
+        thought_log = RichLog(wrap=True, markup=True)
+        self._thought_log = thought_log
+        self._mount_output(
+            Collapsible(
+                thought_log,
+                title="奶浓思考ing...",
+                collapsed=True,
+                collapsed_symbol="▶",
+                expanded_symbol="▼",
+            )
+        )
         stream_out = _StreamingTUIWriter(self, kind="stdout")
         stream_err = _StreamingTUIWriter(self, kind="stderr")
 
@@ -1142,12 +1370,34 @@ class CodeAgentTUI(App):
                 stream_err.finish()
             except Exception:
                 pass
+            # Stop routing stream output into thought log
+            self._thought_log = None
             self._set_busy(False)
 
         # Render the assistant's final answer (high-contrast, easy to scan).
-        if getattr(self.agent, "last_direct_reply", False):
-            self._write("")
-            self._write_assistant_message(response)
+        self._write("")
+        self._write_assistant_message(response)
+
+        # Tool confirmation marker interception (Cursor-like gating)
+        m = CONFIRM_TOOL_RE.search(response or "")
+        if m:
+            try:
+                payload = json.loads(m.group(1))
+                tool = payload.get("tool") or "terminal"
+                tool_input = payload.get("tool_input") or ""
+                # store pending tool request
+                self.pending_tool_name = str(tool)
+                self.pending_tool_input = str(tool_input)
+                self.pending_tool_user_input = user_in
+
+                self._write("")
+                self._write_rule("需要确认执行命令/工具", border_style="#e0af68", title_style="bold #e0af68")
+                self._write_kv("tool", str(tool))
+                self._write_kv("input", str(tool_input)[:400])
+                self._write_warning("是否允许运行？(y/n)")
+            except Exception:
+                pass
+            return
 
         patch_text = extract_patch(response)
         if not patch_text:
@@ -1156,23 +1406,170 @@ class CodeAgentTUI(App):
         if patch_text.strip() == "*** Begin Patch\n*** End Patch":
             return
 
-        if patch_requires_confirmation(patch_text):
-            self.pending_patch_text = patch_text
-            self.pending_user_input = user_in
+        # Cursor-like gating: always require confirmation before applying patch.
+        self.pending_patch_text = patch_text
+        self.pending_user_input = user_in
+        self._write("")
+        self._write_rule("即将应用补丁", border_style="#e0af68", title_style="bold #e0af68")
+        # simple stats
+        add = sum(1 for l in patch_text.splitlines() if l.startswith("+") and not l.startswith("+++"))
+        sub = sum(1 for l in patch_text.splitlines() if l.startswith("-") and not l.startswith("---"))
+        files = []
+        for l in patch_text.splitlines():
+            if l.startswith("*** Update File:") or l.startswith("*** Add File:") or l.startswith("*** Delete File:"):
+                files.append(l.replace("*** ", "").strip())
+        if files:
+            self._write_kv("files", ", ".join(files[:8]) + (" ..." if len(files) > 8 else ""))
+        self._write_kv("diff", f"+{add} / -{sub}")
+        self._write_warning("是否应用？(y/n)")
+        return
+
+    async def _run_tool_then_continue(self, tool: str, tool_input: str, original_user_in: str, approved: bool) -> None:
+        """Run a pending tool (if approved) and continue agent decision."""
+        self._set_busy(True)
+
+        if not approved:
+            self._write_warning(f"已拒绝执行：{tool}")
+            prompt = (
+                f"用户拒绝执行工具/命令：{tool}\n"
+                f"拟执行输入：{tool_input}\n\n"
+                "请基于现有信息继续决策（不要再要求执行同一命令），给出替代取证方式或直接结论。"
+            )
+            self._set_busy(False)
+            self.turns += 1
             self._write("")
-            self._write("⚠️ 检测到高风险补丁（删除/大规模变更）。是否应用？(y/n)")
+            self._write_user_message("（系统）拒绝执行命令后继续")
+            await self._run_turn_async(prompt)
             return
 
-        self._apply_patch(user_in, patch_text)
+        # approved: execute tool and feed result back to agent
+        def _run() -> str:
+            return self.agent.registry.execute_tool(tool, tool_input)
+
+        try:
+            out = await asyncio.to_thread(_run)
+            self._write_success(f"已执行：{tool}")
+            self._write(out)
+            prompt = (
+                f"用户允许执行工具/命令：{tool}\n"
+                f"输入：{tool_input}\n\n"
+                f"输出：\n{out}\n\n"
+                "请基于该输出继续下一步（不要重复执行同一命令）。"
+            )
+        finally:
+            self._set_busy(False)
+
+        self.turns += 1
+        self._write("")
+        self._write_user_message("（系统）命令结果已获取，继续决策")
+        await self._run_turn_async(prompt)
+
+    async def _run_verify_async(self, command: str) -> None:
+        """Run verification command via terminal tool (non-blocking UI)."""
+        self._write("")
+        self._write_rule("验证 / Verify", border_style="#e0af68", title_style="bold #e0af68")
+        self._write_kv("command", command)
+
+        self._set_busy(True)
+        start = time.time()
+
+        def _run() -> str:
+            # Prefer structured args so terminal tool can gate dangerous ops.
+            payload = json.dumps({"command": command, "allow_dangerous": False}, ensure_ascii=False)
+            return self.agent.registry.execute_tool("terminal", payload)
+
+        try:
+            out = await asyncio.to_thread(_run)
+            self._write(out)
+            ok = not str(out).startswith("❌") and "返回码" not in str(out)
+        except Exception as e:
+            out = str(e)
+            ok = False
+            self._write_error(f"验证失败: {e}")
+        finally:
+            self._set_busy(False)
+
+        # 存起来，方便 /fix 继续
+        self._last_verify_command = command
+        self._last_verify_output = out if isinstance(out, str) else str(out)
+        self._last_verify_ok = ok
+
+        # 将 verify 输出作为“证据包”注入到下一轮上下文（用户不需要手动复述报错）
+        try:
+            evidence_text = (
+                "[Verify]\n"
+                f"command: {command}\n"
+                "output:\n"
+                f"{self._last_verify_output}"
+            )
+            self.agent.recent_tool_packets.append(
+                ContextPacket(content=evidence_text, metadata={"type": "tool_result", "source": "verify"})
+            )
+            if len(self.agent.recent_tool_packets) > 8:
+                self.agent.recent_tool_packets = self.agent.recent_tool_packets[-8:]
+        except Exception:
+            pass
+
+        if not ok:
+            self._write_warning("验证未通过：可直接输入 /fix 让我基于本次输出继续修复。")
+
+        log_event(
+            "verify",
+            {
+                "ok": ok,
+                "ms": int((time.time() - start) * 1000),
+                "summary": command,
+                "output_preview": (out[:1600] + "...<truncated>") if isinstance(out, str) and len(out) > 1600 else out,
+            },
+        )
+
+    async def _run_bang_command(self, command: str, *, allow_dangerous: bool) -> None:
+        """Run a user-requested shell command directly (no agent)."""
+        self._write("")
+        self._write_rule("用户终端（!）", border_style="#4FC3F7", title_style="bold #4FC3F7")
+        self._write_kv("command", command)
+
+        self._set_busy(True)
+
+        def _run() -> str:
+            payload = json.dumps(
+                {"command": command, "allow_dangerous": allow_dangerous, "shell_mode": True},
+                ensure_ascii=False,
+            )
+            return self.agent.registry.execute_tool("terminal", payload)
+
+        try:
+            out = await asyncio.to_thread(_run)
+        finally:
+            self._set_busy(False)
+
+        # If terminal asks for dangerous confirmation, do it in UI instead of blocking stdin.
+        if isinstance(out, str) and "allow_dangerous=true" in out and not allow_dangerous:
+            self.pending_bang_command = command
+            self._write_warning("该命令需要确认（可能包含写盘/命令替换/非白名单）。是否继续？(y/n)")
+            return
+
+        # Show result
+        self._write(out if isinstance(out, str) else str(out))
 
     def _apply_patch(self, user_in: str, patch_text: str) -> None:
         try:
+            start = time.time()
             res = self.patch_executor.apply(patch_text)
             self._write("")
             self._write("✅ Patch applied")
             self._write(f"files: {', '.join(res.files_changed) if res.files_changed else '(none)'}")
             if res.backups:
                 self._write(f"backups: {len(res.backups)} (in .helloagents/backups/...)")
+            log_event(
+                "patch_apply",
+                {
+                    "ok": True,
+                    "ms": int((time.time() - start) * 1000),
+                    "summary": f"{len(res.files_changed or [])} files",
+                    "files_changed": res.files_changed,
+                },
+            )
             self.agent.note_tool.run(
                 {
                     "action": "create",
@@ -1186,6 +1583,15 @@ class CodeAgentTUI(App):
         except PatchApplyError as e:
             self._write("")
             self._write(f"❌ Patch failed: {e}")
+            log_event(
+                "patch_apply",
+                {
+                    "ok": False,
+                    "ms": 0,
+                    "summary": "PatchApplyError",
+                    "error": str(e),
+                },
+            )
             self.agent.note_tool.run(
                 {
                     "action": "create",

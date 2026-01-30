@@ -26,6 +26,7 @@
 - terminal[...]：只读检索；支持管道等，但重定向/子命令替换/危险命令需确认。写文件用补丁。
 - note[...]：记录关键结论/阻塞/行动。
 - memory[...]：跨会话情景记忆，需显式 add。
+- skills[...]：技能库（SOP/工作流）渐进式加载。先 skills[list/search] 找到合适技能，再 skills[show] 加载 SKILL.md 内容按流程执行。
 - plan[...]：多步/模糊任务时生成计划；或用户要求时调用。
 - todo[...]：多步骤任务跟踪，状态 pending/in_progress/completed（仅 1 个 in_progress）。
 

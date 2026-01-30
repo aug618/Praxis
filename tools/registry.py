@@ -3,6 +3,7 @@
 from typing import Optional, Any, Callable
 import json
 import time
+import uuid
 from .base import Tool
 from utils.observability import log_event
 
@@ -88,11 +89,42 @@ class ToolRegistry:
             try:
                 start = time.time()
                 raw = (input_text or "").strip()
+                tool_call_id = uuid.uuid4().hex[:12]
                 
                 # 预处理：如果输入包含换行和另一个 Action，只取第一行
                 if '\n' in raw and 'Action:' in raw:
                     lines = raw.split('\n')
                     raw = lines[0].strip()
+
+                def _scrub(obj: Any) -> Any:
+                    """脱敏：避免把 key/token/password 等写进日志。"""
+                    try:
+                        if isinstance(obj, dict):
+                            out = {}
+                            for k, v in obj.items():
+                                lk = str(k).lower()
+                                if any(s in lk for s in ["api_key", "apikey", "token", "password", "secret", "key"]):
+                                    out[k] = "***"
+                                else:
+                                    out[k] = _scrub(v)
+                            return out
+                        if isinstance(obj, list):
+                            return [_scrub(x) for x in obj[:50]]
+                        if isinstance(obj, str):
+                            return obj if len(obj) <= 2000 else (obj[:2000] + "...<truncated>")
+                        return obj
+                    except Exception:
+                        return "***"
+
+                def _preview(text: Any, limit: int = 1200) -> str:
+                    try:
+                        s = text if isinstance(text, str) else json.dumps(text, ensure_ascii=False)
+                    except Exception:
+                        s = str(text)
+                    s = s.strip()
+                    if len(s) <= limit:
+                        return s
+                    return s[:limit] + "...<truncated>"
 
                 # 1) JSON 直通：允许 ReAct 里用 tool[{"k":"v"}] 精确传参
                 def _try_json(txt: str):
@@ -156,8 +188,36 @@ class ToolRegistry:
                         pass
 
                 if isinstance(obj, dict):
+                    safe_in = _scrub(obj)
                     result = tool.run(obj)
-                    log_event("tool", {"tool": name, "ok": True, "ms": int((time.time() - start) * 1000)})
+                    safe_out = _preview(result, limit=1600)
+                    # 轻量 evidence：对常见工具提取关键字段，方便 UI 展示“证据来源”
+                    evidence: dict[str, Any] = {}
+                    try:
+                        if name == "terminal":
+                            cmd = safe_in.get("command") or safe_in.get("input")
+                            if cmd:
+                                evidence["command"] = cmd
+                        if name == "context_fetch":
+                            for k in ["sources", "query", "paths"]:
+                                if k in safe_in:
+                                    evidence[k] = safe_in.get(k)
+                    except Exception:
+                        pass
+
+                    log_event(
+                        "tool",
+                        {
+                            "tool": name,
+                            "tool_call_id": tool_call_id,
+                            "ok": True,
+                            "ms": int((time.time() - start) * 1000),
+                            "input": safe_in,
+                            "output_preview": safe_out,
+                            "output_len": len((result or "").encode("utf-8", errors="ignore")) if isinstance(result, str) else None,
+                            "evidence": evidence or None,
+                        },
+                    )
                     return result
 
                 # 2) 单参数兜底：如果工具只有一个必填参数，把 input_text 映射到该参数名
@@ -166,17 +226,49 @@ class ToolRegistry:
                 # 2a 无必填参数：允许空参数调用
                 if len(required) == 0:
                     result = tool.run({})
-                    log_event("tool", {"tool": name, "ok": True, "ms": int((time.time() - start) * 1000)})
+                    log_event(
+                        "tool",
+                        {
+                            "tool": name,
+                            "tool_call_id": tool_call_id,
+                            "ok": True,
+                            "ms": int((time.time() - start) * 1000),
+                            "input": {},
+                            "output_preview": _preview(result, limit=1600),
+                        },
+                    )
                     return result
                 if len(required) == 1:
-                    result = tool.run({required[0].name: input_text})
-                    log_event("tool", {"tool": name, "ok": True, "ms": int((time.time() - start) * 1000)})
+                    in_obj = {required[0].name: input_text}
+                    result = tool.run(in_obj)
+                    log_event(
+                        "tool",
+                        {
+                            "tool": name,
+                            "tool_call_id": tool_call_id,
+                            "ok": True,
+                            "ms": int((time.time() - start) * 1000),
+                            "input": _scrub(in_obj),
+                            "output_preview": _preview(result, limit=1600),
+                        },
+                    )
                     return result
 
                 # 3) 兼容旧行为：若存在 input 参数，使用 input
                 if any(p.name == "input" for p in params):
-                    result = tool.run({"input": input_text})
-                    log_event("tool", {"tool": name, "ok": True, "ms": int((time.time() - start) * 1000)})
+                    in_obj = {"input": input_text}
+                    result = tool.run(in_obj)
+                    log_event(
+                        "tool",
+                        {
+                            "tool": name,
+                            "tool_call_id": tool_call_id,
+                            "ok": True,
+                            "ms": int((time.time() - start) * 1000),
+                            "input": _scrub(in_obj),
+                            "output_preview": _preview(result, limit=1600),
+                        },
+                    )
                     return result
 
                 return (
@@ -184,7 +276,17 @@ class ToolRegistry:
                     "请使用 JSON 形式传参，例如：tool[{\"param\":\"value\"}]"
                 )
             except Exception as e:
-                log_event("tool", {"tool": name, "ok": False, "ms": int((time.time() - start) * 1000), "error": str(e)})
+                log_event(
+                    "tool",
+                    {
+                        "tool": name,
+                        "tool_call_id": tool_call_id,
+                        "ok": False,
+                        "ms": int((time.time() - start) * 1000),
+                        "input_preview": (raw[:600] + "...<truncated>") if isinstance(raw, str) and len(raw) > 600 else raw,
+                        "error": str(e),
+                    },
+                )
                 return f"错误：执行工具 '{name}' 时发生异常: {str(e)}"
 
         # 查找函数工具
@@ -192,11 +294,31 @@ class ToolRegistry:
             func = self._functions[name]["func"]
             try:
                 start = time.time()
+                tool_call_id = uuid.uuid4().hex[:12]
                 result = func(input_text)
-                log_event("tool", {"tool": name, "ok": True, "ms": int((time.time() - start) * 1000)})
+                log_event(
+                    "tool",
+                    {
+                        "tool": name,
+                        "tool_call_id": tool_call_id,
+                        "ok": True,
+                        "ms": int((time.time() - start) * 1000),
+                        "input_preview": (input_text[:600] + "...<truncated>") if isinstance(input_text, str) and len(input_text) > 600 else input_text,
+                        "output_preview": (result[:1600] + "...<truncated>") if isinstance(result, str) and len(result) > 1600 else result,
+                    },
+                )
                 return result
             except Exception as e:
-                log_event("tool", {"tool": name, "ok": False, "ms": int((time.time() - start) * 1000), "error": str(e)})
+                log_event(
+                    "tool",
+                    {
+                        "tool": name,
+                        "tool_call_id": tool_call_id,
+                        "ok": False,
+                        "ms": int((time.time() - start) * 1000),
+                        "error": str(e),
+                    },
+                )
                 return f"错误：执行工具 '{name}' 时发生异常: {str(e)}"
 
         else:
