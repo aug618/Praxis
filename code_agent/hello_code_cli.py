@@ -32,7 +32,7 @@ def main(argv: list[str] | None = None) -> int:
     初始化 LLM、CodebaseMaintainer 和 PatchExecutor，并进入交互式循环。
     """
     # 1. 解析命令行参数
-    parser = argparse.ArgumentParser(description="HelloAgents-style Code Agent CLI (Codex/Claude-like)")
+    parser = argparse.ArgumentParser(description=" Code Agent CLI (Codex/Claude-like)")
     parser.add_argument("--repo", type=str, default=".", help="Repository root (workspace). Default: .")
     parser.add_argument("--project", type=str, default=None, help="Project name (default: repo folder name)")
     args = parser.parse_args(argv)
