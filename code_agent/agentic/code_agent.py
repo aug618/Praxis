@@ -316,6 +316,50 @@ class CodeAgent:
         }
         p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    def _capture_recent_tool_evidence(self) -> tuple[bool, bool]:
+        """收集最近一轮 ReAct 工具摘要，并返回 todo 使用情况。"""
+        todo_used = False
+        todo_listed = False
+        tool_summaries: List[str] = []
+
+        try:
+            for item in getattr(self.react, "last_trace", [])[-6:]:
+                summary = item.get("observation_summary")
+                tool_name = item.get("tool_name")
+                if tool_name == "todo":
+                    todo_used = True
+                    if "list" in str(item.get("tool_input", "")):
+                        todo_listed = True
+                if summary:
+                    tool_summaries.append(
+                        f"[{tool_name}] {item.get('tool_input')}\n{summary}"
+                    )
+
+            if tool_summaries:
+                self.recent_tool_packets.append(
+                    ContextPacket(
+                        content="[Tool Evidence]\n" + "\n\n".join(tool_summaries),
+                        metadata={"type": "tool_result", "source": "react"},
+                    )
+                )
+                if len(self.recent_tool_packets) > 8:
+                    self.recent_tool_packets = self.recent_tool_packets[-8:]
+        except Exception:
+            pass
+
+        return todo_used, todo_listed
+
+    def _append_todo_snapshot_if_needed(self, response: str, todo_used: bool, todo_listed: bool) -> str:
+        """如果本轮使用过 todo 但未主动 list，则在回复末尾补充看板快照。"""
+        if not todo_used or todo_listed:
+            return response
+
+        try:
+            todo_snapshot = self.todo_tool.run({"action": "list"})
+            return f"{response}\n\nTodo board:\n{todo_snapshot}"
+        except Exception:
+            return response
+
     def run_turn(self, user_input: str, image_paths: Optional[List[str | Path]] = None) -> str:
         """
         执行一轮对话：
@@ -378,7 +422,7 @@ class CodeAgent:
         # 闲聊/问候：直接回复，避免 ReAct 的严格格式解析失败，也避免无谓的工具调用。
         if self._is_chitchat(clean_query) and not refs.context_blocks and not all_attachments:
             self.last_direct_reply = True
-            reply = "你好！我是 Code Agent，可以帮你按需探索代码仓库、生成补丁并在确认后落盘。你想做什么？（例如：分析项目结构 / 搜索某个类 / 修复一个报错）"
+            reply = "你好！我是 奶龙版Code Agent，可以帮你按需探索代码仓库、生成补丁并在确认后落盘。你想做什么？（例如：分析项目结构 / 搜索某个类 / 修复一个报错）"
             self.history.append(Message(content=user_input, role="user", timestamp=datetime.now()))
             self.history.append(Message(content=reply, role="assistant", timestamp=datetime.now()))
             if len(self.history) > 50:
@@ -487,33 +531,7 @@ class CodeAgent:
         response = self.react.run(context_text, max_tokens=8000, attachments=attachments)
 
         # 收集本轮的工具执行证据 (已在 ReActAgent 内部摘要)
-        try:
-            tool_summaries: List[str] = []
-            todo_used = False
-            todo_listed = False
-            for item in getattr(self.react, "last_trace", [])[-6:]:
-                summary = item.get("observation_summary")
-                tname = item.get("tool_name")
-                if tname == "todo":
-                    todo_used = True
-                    if "list" in str(item.get("tool_input", "")):
-                        todo_listed = True
-                if summary:
-                    tool_summaries.append(
-                        f"[{item.get('tool_name')}] {item.get('tool_input')}\n{summary}"
-                    )
-            if tool_summaries:
-                self.recent_tool_packets.append(
-                    ContextPacket(
-                        content="[Tool Evidence]\n" + "\n\n".join(tool_summaries),
-                        metadata={"type": "tool_result", "source": "react"},
-                    )
-                )
-                # 保持缓冲区较小
-                if len(self.recent_tool_packets) > 8:
-                    self.recent_tool_packets = self.recent_tool_packets[-8:]
-        except Exception:
-            pass
+        todo_used, todo_listed = self._capture_recent_tool_evidence()
 
         # 更新历史记录 (保留最近 50 条)
         # 记录原始输入（包含 @file/@dir 标记，便于回顾）
@@ -526,10 +544,4 @@ class CodeAgent:
         if len(self.history) > 50:
             self.history = self.history[-50:]
         self._persist_session()
-        try:
-            if todo_used and not todo_listed:
-                todo_snapshot = self.registry.execute_tool("todo", {"action": "list"})
-                response = f"{response}\n\nTodo board:\n{todo_snapshot}"
-        except Exception:
-            pass
-        return response
+        return self._append_todo_snapshot_if_needed(response, todo_used, todo_listed)

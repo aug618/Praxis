@@ -123,6 +123,7 @@ class WorkingMemory(BaseMemory):
                 # 分词匹配
                 query_words = set(query_lower.split())
                 content_words = set(content_lower.split())
+                #按交集计算分数
                 intersection = query_words.intersection(content_words)
                 if intersection:
                     keyword_score = len(intersection) / len(query_words.union(content_words)) * 0.8

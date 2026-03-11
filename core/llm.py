@@ -144,8 +144,8 @@ class HelloAgentsLLM:
         4. 默认返回通用配置
         """
         # 1. 检查特定提供商的环境变量
-        if os.getenv("OPENAI_API_KEY"):
-            return "openai"
+        if os.getenv("ZHIPU_API_KEY") or os.getenv("GLM_API_KEY"):
+            return "zhipu"
         if os.getenv("DEEPSEEK_API_KEY"):
             return "deepseek"
         if os.getenv("DASHSCOPE_API_KEY"):
@@ -154,8 +154,8 @@ class HelloAgentsLLM:
             return "modelscope"
         if os.getenv("KIMI_API_KEY") or os.getenv("MOONSHOT_API_KEY"):
             return "kimi"
-        if os.getenv("ZHIPU_API_KEY") or os.getenv("GLM_API_KEY"):
-            return "zhipu"
+        if os.getenv("OPENAI_API_KEY"):
+            return "openai"
         if os.getenv("OLLAMA_API_KEY") or os.getenv("OLLAMA_HOST"):
             return "ollama"
         if os.getenv("VLLM_API_KEY") or os.getenv("VLLM_HOST"):

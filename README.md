@@ -2,257 +2,279 @@
 
 # Praxis
 
-**一个面向本地代码仓库的智能 AI 编程助手**
+**一个面向本地代码仓库的 AI 编程助手，提供 CLI 与 TUI 两套交互界面。**
 
 [![Python](https://img.shields.io/badge/python-3.12+-3776ab?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-22c55e?style=flat-square)](LICENSE)
 [![uv](https://img.shields.io/badge/package%20manager-uv-7c3aed?style=flat-square)](https://github.com/astral-sh/uv)
-[![hello-agents](https://img.shields.io/badge/powered%20by-hello--agents-f59e0b?style=flat-square)](https://github.com/hello-agents)
 
-[特性](#-核心特性) · [快速开始](#-快速开始) · [架构](#-系统架构) · [配置](#-配置参考) · [使用指南](#-使用指南) · [路线图](#-路线图)
+[快速开始](#快速开始)  · [CLI](#cli) · [TUI](#tui) · [使用说明](#使用说明) · [配置参考](#配置参考) · [架构概览](#架构概览)
 
 </div>
 
 ---
 
-Praxis 是一个基于 [hello-agents](https://github.com/hello-agents) 框架构建的交互式 AI 编程助手，提供类似 Claude Code / Codex 的本地代码库操作体验。Agent 以 **ReAct 范式**驱动，先通过工具收集证据，再生成补丁落盘，全程支持人工干预与安全回滚。
-
-```bash
-# 30 秒上手
-git clone <repo-url> && cd praxis
-uv sync
-cp test/.env.example .env  # 填写 API Key
-uv run python -m code_agent.hello_code_cli --repo .
-```
-
-## 核心特性
-
-| 特性 | 说明 |
-|------|------|
-| **ReAct 推理引擎** | 思考 → 行动 → 观察 循环，支持多步骤复杂任务 |
-| **安全补丁系统** | 原子写入 + 自动备份（`.backup`），危险操作二次确认 |
-| **GSSC 上下文流水线** | Gather → Select → Structure → Compress，按需裁剪 Token |
-| **四层记忆系统** | WorkingMemory / EpisodicMemory / SemanticMemory / PerceptualMemory |
-| **可扩展工具注册表** | 统一的 `ToolRegistry`，内置 6 类工具，支持自定义挂载 |
-| **多 LLM 后端** | 兼容 OpenAI / DeepSeek / Qwen 等任意 OpenAI 协议接口 |
-
----
+Praxis 基于 ReAct 工作流运行：先收集代码证据，再决定是否调用工具，最后生成补丁并在确认后落盘。项目面向本地仓库使用，支持文件/目录引用、补丁确认、会话日志、模型切换，以及面向长会话的 TUI 交互。
 
 ## 快速开始
 
 ### 环境要求
 
-- Python ≥ 3.12
-- [uv](https://github.com/astral-sh/uv)（推荐）或 pip
+- Python 3.12+
+- uv（推荐）或 pip
 
 ### 安装
 
 ```bash
-# 克隆仓库
-git clone <repository-url>
-cd praxis
-
-# 创建虚拟环境并安装依赖（uv 会自动锁版本）
-uv venv && uv sync
+git clone https://github.com/aug618/Praxis.git
+cd Praxis
+uv venv
+uv sync
 ```
 
-### 配置
+### 配置 .env
 
-在项目根目录创建 `.env`（可参考 `test/.env.example`）：
+可先参考根目录的 env.example 复制一份到 .env：
+
+```bash
+cp env.example .env
+```
+
+最小配置示例：
 
 ```dotenv
-# ── LLM（必填）──────────────────────────────────────────────
-LLM_BASE_URL=https://api.deepseek.com
-LLM_MODEL=deepseek-chat
-DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxx
+# 任选一种 OpenAI 兼容后端
+LLM_MODEL_ID=glm-4.7
+LLM_BASE_URL=https://open.bigmodel.cn/api/paas/v4
+ZHIPU_API_KEY=your_api_key
 
-# ── 可选调优 ────────────────────────────────────────────────
-CODE_AGENT_MAX_STEPS=15          # 最大推理步数
-HELLOAGENTS_DIR=.helloagents     # 数据目录（notes / memory / sessions）
+# 可选
+HELLOAGENTS_DIR=.helloagents
+CODE_AGENT_MAX_REACT_STEPS=20
+LLM_TIMEOUT=60
 ```
+
+也可以换成 DeepSeek / Qwen 等兼容接口；HelloAgentsLLM 会根据环境变量自动选择 provider。
 
 ### 启动
 
 ```bash
-# 分析当前目录下的代码库
+# CLI
+python -m code_agent.hello_code_cli --repo .
+
+# TUI
+python -m code_agent.hello_code_tui --repo .
+```
+
+如果你用 uv，也可以直接：
+
+```bash
 uv run python -m code_agent.hello_code_cli --repo .
-
-# 指定任意路径
-uv run python -m code_agent.hello_code_cli --repo /path/to/project
+uv run python -m code_agent.hello_code_tui --repo .
 ```
 
----
+## CLI
+![CLI 运行截图](images/cli.png)
 
-## 使用指南
+CLI 适合偏命令行、一次一问一答的使用方式。它会在启动时做 LLM 预检，进入后支持自然语言任务、引用文件/目录、模型切换、计划生成和补丁确认。
 
-### 交互示例
+启动命令：
 
+```bash
+python -m code_agent.hello_code_cli --repo /path/to/repo
 ```
-📂 Repo: /path/to/project  |  Model: deepseek-chat
 
-> 帮我找出 memory/manager.py 中所有公开方法，并写一份简洁的注释
+CLI 内置命令：
 
-Thought: 先读取文件内容，再逐一分析公开方法
-Action : context_fetch[path=memory/manager.py]
-Obs    : [文件内容 ...]
+| 命令 | 说明 |
+|------|------|
+| `/quit` | 退出当前会话 |
+| `/plan <目标> [--save]` | 生成执行计划，可保存到 notes |
+| `/model` | 查看并切换模型 |
+| `/stats [current\|last\|session_id]` | 查看会话统计 |
+| `/export [current\|last\|session_id]` | 导出会话日志 |
 
-Thought: 共发现 5 个公开方法，开始生成注释补丁
+CLI 特点：
 
+- 启动快，适合直接执行代码分析或补丁任务。
+- 检测到补丁后会提示确认，并自动备份修改前文件。
+- 支持 `@file(...)`、`@dir(...)` 引用语法。
+- 多模态模型会直接发送图片，文本模型会自动走 OCR。
+
+## TUI
+<video src="images/tui.mp4" controls width="100%"></video>
+
+TUI 基于 Textual，适合长会话和持续观察执行过程的场景。它与 CLI 共享同一套 agent 能力，差异主要体现在界面、补全、trace 展示和交互体验上。
+
+启动命令：
+
+```bash
+python -m code_agent.hello_code_tui --repo /path/to/repo
+```
+
+TUI 内置命令：
+
+| 命令 | 说明 |
+|------|------|
+| `/quit` | 退出 |
+| `/plan <目标> [--save]` | 生成计划，可保存 |
+| `/model` 或 `/model <序号/模型名>` | 查看或切换模型 |
+| `/stats [current\|last\|session_id]` | 查看会话统计 |
+| `/export [current\|last\|session_id]` | 导出会话日志 |
+| `/clear` | 清空输出面板 |
+| `!<command>` | 直接执行终端命令，不经过 agent |
+
+TUI 额外交互：
+
+- `Ctrl+T`：展开或折叠 Trace Timeline。
+- `Ctrl+L`：切换 Logo 显示。
+- `Tab`：命令补全。
+- Trace 面板会增量显示当前会话的 LLM、工具和补丁事件。
+
+## 使用说明
+
+### 1. 提出任务
+
+直接输入自然语言即可，例如：
+
+```text
+帮我分析 tools/registry.py 的工具调用流程
+```
+
+### 2. 引用文件、目录或图片
+
+常用引用方式：
+
+```text
+@file(core/llm.py) 为什么这里会读到错误的环境变量？
+@dir(code_agent/, tools/) 帮我梳理这两个目录的职责
+@file(main.py, screenshot.png) 结合代码和截图分析问题
+```
+
+说明：
+
+- `@file(...)` 适合精确分析单个或多个文件。
+- `@dir(...)` 会把目录结构和关键文件作为上下文注入。
+- 图片在多模态模型下直接发送；文本模型下会自动 OCR。
+
+### 3. 审核并应用补丁
+
+当模型输出标准补丁时，Praxis 会自动识别并进入应用流程。高风险补丁会要求额外确认。
+
+```text
 *** Begin Patch
-Update File: memory/manager.py
+*** Update File: path/to/file.py
 ...
 *** End Patch
-
-Apply patch? [y/N] y
-✓ Patch applied (backup: memory/manager.py.backup)
 ```
 
-### 内置工具速查
+补丁应用后会记录：
 
-| 工具 | 触发关键词示例 | 说明 |
-|------|---------------|------|
-| `TerminalTool` | `ls`, `rg`, `cat`, `grep` | 安全终端，白名单命令，危险操作需确认 |
-| `ContextFetchTool` | 读取文件 / 目录 | 按需获取代码内容，避免全库扫描 |
-| `NoteTool` | 记录决策 / 阻塞 | 写入 `.helloagents/notes/` |
-| `TodoTool` | 拆解任务 / 追踪进度 | `pending → in_progress → completed` |
-| `PlanTool` | `:plan <目标>` | 生成分步执行计划 |
-| `MemoryTool` | 长期记忆存取 | SQLite 持久化，存储于 `.helloagents/memory/` |
+- 修改文件列表
+- 备份文件
+- 会话日志与 patch note
 
-### 补丁格式
+### 4. 验证并迭代修复
 
-模型输出以下格式时，CLI 将自动检测并提示应用：
+验证依然建议直接描述给 agent，或使用 `!<command>` 在 TUI 中执行终端命令后，再把结果继续交给 agent 处理。
 
-```
-*** Begin Patch
-Update File: src/foo.py
-<<<
-旧代码
-===
-新代码
->>>
-*** End Patch
+## 常见工作流
+
+### 代码阅读
+
+```text
+@dir(core/, tools/) 先告诉我这两个模块分别负责什么，再指出主要入口
 ```
 
-> **安全机制**：`Delete File`、`git reset --hard`、大规模变更（>50 行）均需用户输入 `y` 确认。
+### 定点修复
 
----
-
-## 系统架构
-
-```
-┌──────────────────────────────────┐
-│         CLI  /  TUI              │  hello_code_cli.py · hello_code_tui.py
-└────────────────┬─────────────────┘
-                 │
-┌────────────────▼─────────────────┐
-│           Agent 层               │  ReActAgent · PlanSolveAgent
-│                                  │  ReflectionAgent · SimpleAgent
-└────────────────┬─────────────────┘
-                 │
-        ┌────────┴────────┐
-        ▼                 ▼
-┌───────────────┐  ┌──────────────────┐
-│   Core 层     │  │   能力层          │
-│  LLM · Msg   │  │ ContextBuilder    │
-│  Config · Exc │  │ MemoryManager    │
-└───────────────┘  └──────────────────┘
-                 │
-        ┌────────┴────────┐
-        ▼                 ▼
-┌───────────────┐  ┌──────────────────┐
-│   Tools 层    │  │   Executors 层    │
-│ ToolRegistry  │  │ ApplyPatch       │
-│ 6 × Builtin   │  │ Executor         │
-└───────────────┘  └──────────────────┘
+```text
+@file(core/config.py) 这里有弃用警告，帮我用最小改动修复
 ```
 
-### 模块职责
+### 带验证的修复闭环
 
-| 模块 | 路径 | 职责 |
-|------|------|------|
-| **Core** | `core/` | LLM 统一接口、消息抽象、配置、异常体系 |
-| **Agents** | `agents/` | ReAct / Plan / Reflection / Simple 四种范式 |
-| **Code Agent** | `code_agent/` | CLI/TUI 入口、CodeAgent 主循环、Prompt 模板 |
-| **Context** | `context/` | GSSC 流水线：按 Token 预算聚合多源上下文 |
-| **Memory** | `memory/` | 四层记忆 + RAG 流水线 + Qdrant/Neo4j 存储后端 |
-| **Tools** | `tools/` | 工具基类、注册表、工具链、异步执行器 |
-| **Utils** | `utils/` | UI 渲染、日志、序列化、会话管理、补丁工具 |
-
----
-
-## 项目结构
-
-```
-codeGamer/
-├── agents/                   # Agent 范式实现
-│   ├── react_agent.py
-│   ├── plan_solve_agent.py
-│   ├── reflection_agent.py
-│   └── simple_agent.py
-├── code_agent/               # 主应用
-│   ├── hello_code_cli.py     # CLI 入口
-│   ├── hello_code_tui.py     # TUI 入口（Textual）
-│   ├── agentic/
-│   │   └── code_agent.py     # CodeAgent 主循环
-│   ├── executors/
-│   │   └── apply_patch_executor.py
-│   └── prompts/              # 系统提示词模板
-├── core/                     # 核心抽象层
-├── context/                  # GSSC 上下文构建
-├── memory/                   # 多层记忆 + RAG
-│   ├── types/                # Working / Episodic / Semantic / Perceptual
-│   ├── storage/              # Document / Qdrant / Neo4j
-│   └── rag/                  # 文档处理 + 检索流水线
-├── tools/                    # 工具系统
-│   └── builtin/              # 内置工具集
-├── utils/                    # 公共工具函数
-├── test/                     # 测试 & 配置示例
-│   └── .env.example
-└── pyproject.toml
+```text
+修复完之后跑 pytest -q，若失败就根据输出继续改
 ```
 
----
+### 生成计划再执行
+
+```text
+/plan 把 ToolRegistry 做一次小范围重构 --save
+```
 
 ## 配置参考
 
-| 环境变量 | 默认值 | 说明 |
-|----------|--------|------|
-| `LLM_BASE_URL` | `https://api.openai.com` | OpenAI 兼容接口地址 |
-| `LLM_MODEL` | `gpt-4o` | 模型名称 |
-| `DEEPSEEK_API_KEY` | — | DeepSeek API Key（与 `OPENAI_API_KEY` 二选一） |
-| `CODE_AGENT_MAX_STEPS` | `15` | 单次任务最大推理轮数 |
-| `HELLOAGENTS_DIR` | `.helloagents` | 持久化数据根目录 |
+### 核心配置
 
----
+| 环境变量 | 说明 |
+|----------|------|
+| `LLM_MODEL_ID` | 当前模型名，例如 `glm-4.7`、`deepseek-chat` |
+| `LLM_BASE_URL` | OpenAI 兼容接口地址 |
+| `LLM_API_KEY` | 通用 API Key；也可使用 provider 专用变量 |
+| `ZHIPU_API_KEY` | 智谱 API Key |
+| `DEEPSEEK_API_KEY` | DeepSeek API Key |
+| `DASHSCOPE_API_KEY` / `QWEN_API_KEY` | 通义千问 API Key |
+| `HELLOAGENTS_DIR` | 状态目录，默认 `.helloagents` |
+| `CODE_AGENT_MAX_REACT_STEPS` | ReAct 最大步数 |
+| `CODE_AGENT_MAX_STEPS` | `CODE_AGENT_MAX_REACT_STEPS` 的兼容别名 |
+| `LLM_TIMEOUT` | LLM 请求超时，单位秒 |
 
-## 路线图
+### TUI / 扩展能力相关配置
 
-- [ ] **会话恢复**：断点续传，自动加载上次摘要
-- [ ] **原子化终端工具**：将 `TerminalTool` 拆分为 `ReadFileTool`、`SearchTool` 等粒度更细的工具
-- [ ] **Note Tool 重构**：结构化标签 + 全文检索
-- [ ] **记忆系统升级**：向量召回 + 图谱关联，提升长期记忆精度
-- [ ] **MCP 协议支持**：接入 Model Context Protocol 标准工具链
+| 环境变量 | 说明 |
+|----------|------|
+| `CODE_AGENT_TRACE_ENABLED` | 是否启用 TUI Trace Timeline |
+| `CODE_AGENT_LOGO` | TUI 启动 Logo 图片路径 |
+| `CODE_AGENT_LOGO_MODE` | Logo 渲染模式 |
+| `CODE_AGENT_LOGO_VISIBILITY` | `always` / `once` / `never` |
+| `MCP_MONITOR_COMMAND` | 注册 monitor MCP 工具的启动命令 |
+| `MCP_PLAYWRIGHT_COMMAND` | 注册 Playwright MCP 工具的启动命令 |
+| `CODE_AGENT_SKILLS_DIR` | 自定义 skills 根目录 |
 
----
+状态目录默认位于 `.helloagents/`，常见内容包括：
 
-## 贡献
+- `notes/`：计划、行动、阻塞记录
+- `sessions/`：最近对话持久化
+- `logs/events.jsonl`：LLM / tool / patch 事件日志
+- `backups/`：补丁落盘前的备份
+- `todos/`：Todo 看板
+- `exports/`：通过 `/export` 导出的会话文件
 
-欢迎提交 Issue 和 Pull Request。在开始之前，请阅读以下约定：
+## 架构概览
 
-1. 分支命名：`feat/<功能名>`、`fix/<问题简述>`
-2. 提交信息遵循 [Conventional Commits](https://www.conventionalcommits.org/zh-hans/)
-3. 新特性请附带对应的测试用例
+```text
+code_agent/
+        hello_code_cli.py        CLI 入口
+        hello_code_tui.py        TUI 入口
+        agentic/code_agent.py    主循环、上下文拼装、工具调度
+        executors/               补丁执行器
 
----
+agents/                    ReAct / Reflection / Plan 等 Agent
+core/                      LLM、配置、消息、异常
+context/                   上下文构建
+tools/                     Tool 基类、注册表、内置工具
+memory/                    记忆系统与检索管线
+utils/                     UI、日志、补丁、会话等通用能力
+```
+
+核心执行链路：
+
+1. CLI 或 TUI 接收用户输入。
+2. `CodeAgent` 解析 `@file` / `@dir` / 图片等引用。
+3. `ContextBuilder` 拼接系统提示、历史对话、最近工具证据。
+4. `ReActAgent` 决定是否调用工具，如 terminal、context_fetch、todo、plan、skills。
+5. 若生成补丁，则交给 `ApplyPatchExecutor` 应用并备份。
+
+## 开发与贡献
+
+欢迎提交 Issue 或 Pull Request。建议遵循：
+
+1. 分支命名使用 `feat/<name>`、`fix/<name>`。
+2. 提交信息遵循 Conventional Commits。
+3. 涉及行为修改时附上验证步骤或测试。
 
 ## 许可证
 
-本项目基于 [MIT License](LICENSE) 开源。
-
----
-
-<div align="center">
-
-如果这个项目对你有帮助，欢迎点个 ⭐
-
-</div>
+本项目使用 [MIT License](LICENSE)。

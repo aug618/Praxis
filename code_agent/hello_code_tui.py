@@ -164,8 +164,6 @@ COMMANDS = [
     ("/plan", "生成执行计划 (--save 保存)"),
     ("/stats", "查看会话统计"),
     ("/export", "导出会话数据"),
-    ("/verify", "运行验证命令（写入 Trace / 证据）"),
-    ("/fix", "基于上次 verify 失败输出继续修复"),
     ("/clear", "清空输出"),
     ("/quit", "退出"),
 ]
@@ -225,9 +223,6 @@ class CodeAgentTUI(App):
         self._trace_offset: int = 0
         self._trace_path: Path | None = None
         self._trace_enabled: bool = env_flag_true("CODE_AGENT_TRACE_ENABLED", default=True)
-        self._last_verify_command: str | None = None
-        self._last_verify_output: str | None = None
-        self._last_verify_ok: bool | None = None
         self._thought_log: RichLog | None = None
 
     def compose(self) -> ComposeResult:
@@ -1122,33 +1117,7 @@ class CodeAgentTUI(App):
             self._handle_export(user_in)
             return
 
-        if user_in.startswith("/verify"):
-            # /verify <command...>
-            raw = user_in[len("/verify") :].strip()
-            if not raw:
-                self._write_warning("用法：/verify <command>")
-                return
-            await self._run_verify_async(raw)
-            return
-
-        if user_in.startswith("/fix"):
-            # /fix：把上次 verify 的输出作为证据喂给 agent 继续修复
-            if self._last_verify_ok is True:
-                self._write_success("上次 verify 已通过，无需修复。")
-                return
-            if not self._last_verify_command or not self._last_verify_output:
-                self._write_warning("没有可用的 verify 结果。先运行：/verify <command>")
-                return
-            prompt = (
-                "验证命令失败，请根据以下输出修复问题并给出补丁；修复后给出建议的验证命令。\n\n"
-                f"[Verify Command]\n{self._last_verify_command}\n\n"
-                f"[Verify Output]\n{self._last_verify_output}\n"
-            )
-            self.turns += 1
-            self._write("")
-            self._write_user_message("/fix（基于上次 verify 失败继续修复）")
-            await self._run_turn_async(prompt)
-            return
+        # /verify 和 /fix 命令已移除，不再处理
 
         if user_in.startswith("/plan"):
             self._handle_plan(user_in)
@@ -1522,64 +1491,6 @@ class CodeAgentTUI(App):
         self._write_user_message("（系统）命令结果已获取，继续决策")
         await self._run_turn_async(prompt)
 
-    async def _run_verify_async(self, command: str) -> None:
-        """Run verification command via terminal tool (non-blocking UI)."""
-        self._write("")
-        self._write_rule("验证 / Verify", border_style="#e0af68", title_style="bold #e0af68")
-        self._write_kv("command", command)
-
-        self._set_busy(True)
-        start = time.time()
-
-        def _run() -> str:
-            # Prefer structured args so terminal tool can gate dangerous ops.
-            payload = json.dumps({"command": command, "allow_dangerous": False}, ensure_ascii=False)
-            return self.agent.registry.execute_tool("terminal", payload)
-
-        try:
-            out = await asyncio.to_thread(_run)
-            self._write(out)
-            ok = not str(out).startswith("❌") and "返回码" not in str(out)
-        except Exception as e:
-            out = str(e)
-            ok = False
-            self._write_error(f"验证失败: {e}")
-        finally:
-            self._set_busy(False)
-
-        # 存起来，方便 /fix 继续
-        self._last_verify_command = command
-        self._last_verify_output = out if isinstance(out, str) else str(out)
-        self._last_verify_ok = ok
-
-        # 将 verify 输出作为“证据包”注入到下一轮上下文（用户不需要手动复述报错）
-        try:
-            evidence_text = (
-                "[Verify]\n"
-                f"command: {command}\n"
-                "output:\n"
-                f"{self._last_verify_output}"
-            )
-            self.agent.recent_tool_packets.append(
-                ContextPacket(content=evidence_text, metadata={"type": "tool_result", "source": "verify"})
-            )
-            if len(self.agent.recent_tool_packets) > 8:
-                self.agent.recent_tool_packets = self.agent.recent_tool_packets[-8:]
-        except Exception:
-            pass
-
-        if not ok:
-            self._write_warning("验证未通过：可直接输入 /fix 让我基于本次输出继续修复。")
-
-        log_event(
-            "verify",
-            {
-                "ok": ok,
-                "ms": int((time.time() - start) * 1000),
-                "summary": command,
-                "output_preview": (out[:1600] + "...<truncated>") if isinstance(out, str) and len(out) > 1600 else out,
-            },
-        )
 
     async def _run_bang_command(self, command: str, *, allow_dangerous: bool) -> None:
         """Run a user-requested shell command directly (no agent)."""

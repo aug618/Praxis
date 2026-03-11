@@ -167,7 +167,7 @@ class Config(BaseModel):
     
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典"""
-        return self.dict()
+        return self.model_dump()
     
     def print_summary(self):
         """打印配置摘要"""
