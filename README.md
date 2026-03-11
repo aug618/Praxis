@@ -142,9 +142,9 @@ CLI 演示截图：
 
 ![CLI 运行截图](images/cli.png)
 
-TUI 演示视频：
+TUI 动图演示：
 
-<video src="images/tui.mp4" controls width="100%"></video>
+<img src="images/tui.gif" controls width="100%"></img>
 
 ## 🎯 项目亮点
 
