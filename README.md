@@ -1,36 +1,68 @@
-<div align="center">
-
 # Praxis
 
-<img src="images/logo.png" alt="Praxis Logo" width="200" style="display: block; margin: 0 auto;">
+> 基于 YYHDBL-HelloCodeAgentCli 与 Hello-Agents 框架继续二次开发的本地代码仓库智能助手
 
-**一个面向本地代码仓库的 AI 编程助手，提供 CLI 与 TUI 两套交互界面。**
+<div align="center">
+
+<img src="images/logo.png" alt="Praxis Logo" width="180" />
 
 [![Python](https://img.shields.io/badge/python-3.12+-3776ab?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-22c55e?style=flat-square)](LICENSE)
-[![uv](https://img.shields.io/badge/package%20manager-uv-7c3aed?style=flat-square)](https://github.com/astral-sh/uv)
-
-[快速开始](#快速开始)  · [CLI](#cli) · [TUI](#tui) · [使用说明](#使用说明) · [配置参考](#配置参考) · [架构概览](#架构概览)
+[![Hello-Agents](https://img.shields.io/badge/Hello--Agents-0.2.7-0ea5e9?style=flat-square)](https://github.com/datawhalechina/hello-agents)
+[![License](https://img.shields.io/badge/license-MIT-22c55e?style=flat-square)](LICENSE)
 
 </div>
 
----
+## 📝 项目简介
 
-Praxis 基于 ReAct 工作流运行：先收集代码证据，再决定是否调用工具，最后生成补丁并在确认后落盘。项目面向本地仓库使用，支持文件/目录引用、补丁确认、会话日志、模型切换，以及面向长会话的 TUI 交互。
+Praxis 是一个面向本地代码仓库的 AI Code Agent 项目，直接基于 YYHDBL-HelloCodeAgentCli 继续做二次开发，并沿用其背后的 Hello-Agents 框架能力，目标是提供类似 Claude Code / Codex 的本地交互体验。
 
-另外，Praxis 还集成了两类扩展能力：
+这个项目主要解决本地代码仓库分析、修改和验证流程割裂的问题，把代码理解、工具调用、补丁生成、修改确认和交互展示串成一个完整闭环。
 
-- Skills：把本地安装的技能包当作渐进式加载的 SOP/工作流知识源，Agent 可以先发现，再按需读取具体 SKILL.md。
-- MCP：支持通过外部 MCP server 挂载更多工具。当前代码里已经接好了 monitor 和 playwright 两类 MCP 接入点，但它们都属于“配置后启用”的可选扩展。其中 playwright 通常可以直接通过 `npx` 启动，monitor 则需要你自己提供可执行 server 命令。
+它的特色在于：
+- 同时提供 CLI 与 TUI 两套交互方式
+- 支持 ReAct 多步推理与工具协同
+- 支持标准补丁识别、确认、备份与落盘
+- 支持 Skills 渐进加载与 MCP 扩展工具接入
 
-## 快速开始
+它适用于：
+- 本地代码仓库探索与结构分析
+- 小范围代码修复与重构
+- 代码审查辅助
+- 演示 Agent 工程化落地能力
+
+## ✨ 核心功能
+
+- [x] 本地代码仓库问答与结构分析
+- [x] ReAct 多步推理与工具调用
+- [x] 标准补丁识别、确认、备份与落盘
+- [x] CLI 与 TUI 双交互界面
+- [x] 会话日志、导出与统计
+- [x] Skills 机制接入，支持按需加载 SOP
+- [x] MCP 扩展接入，支持外部工具服务器
+- [x] 文件、目录、图片引用与 OCR / 多模态协同
+
+## 🛠️ 技术栈
+
+- Hello-Agents 0.2.7
+- YYHDBL-HelloCodeAgentCli 二次开发基础
+- ReAct Agent 工作流
+- Python 3.12+
+- Textual TUI
+- OpenAI Compatible LLM API
+- MCP 工具扩展
+- Skills 渐进式知识加载
+
+## 🚀 快速开始
 
 ### 环境要求
 
 - Python 3.12+
-- uv（推荐）或 pip
+- uv 或 pip
+- 可访问的 OpenAI Compatible 模型服务
 
-### 安装
+### 安装依赖
+
+推荐使用 uv：
 
 ```bash
 git clone https://github.com/aug618/Praxis.git
@@ -39,288 +71,122 @@ uv venv
 uv sync
 ```
 
-### 配置 .env
-
-可先参考根目录的 env.example 复制一份到 .env：
+如果使用 pip：
 
 ```bash
-cp env.example .env
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
 ```
 
-最小配置示例：
+### 配置API密钥
+
+```bash
+copy .env.example .env
+```
+
+编辑 .env 文件，填入你的模型配置，例如：
 
 ```dotenv
-# 任选一种 OpenAI 兼容后端
 LLM_MODEL_ID=glm-4.7
 LLM_BASE_URL=https://open.bigmodel.cn/api/paas/v4
 ZHIPU_API_KEY=your_api_key
 
-# 可选
 HELLOAGENTS_DIR=.helloagents
 CODE_AGENT_MAX_REACT_STEPS=20
 LLM_TIMEOUT=60
 ```
 
-也可以换成 DeepSeek / Qwen 等兼容接口；HelloAgentsLLM 会根据环境变量自动选择 provider。
+如果你使用 DeepSeek、Qwen、Ollama 或其他 OpenAI Compatible 后端，只需替换对应的模型名、Base URL 和 API Key。
 
-### 启动
+### 运行项目
+
+项目当前以 Python 脚本形式运行，不依赖 Jupyter Notebook。
+
+启动 CLI：
 
 ```bash
-# CLI
 python -m code_agent.hello_code_cli --repo .
+```
 
-# TUI
+启动 TUI：
+
+```bash
 python -m code_agent.hello_code_tui --repo .
 ```
 
-如果你用 uv，也可以直接：
+如果使用 uv：
 
 ```bash
 uv run python -m code_agent.hello_code_cli --repo .
 uv run python -m code_agent.hello_code_tui --repo .
 ```
 
-## CLI
-![CLI 运行截图](images/cli.png)
+## 📖 使用示例
 
-CLI 适合偏命令行、一次一问一答的使用方式。它会在启动时做 LLM 预检，进入后支持自然语言任务、引用文件/目录、模型切换、计划生成和补丁确认。
-
-启动命令：
-
-```bash
-python -m code_agent.hello_code_cli --repo /path/to/repo
-```
-
-CLI 内置命令：
-
-| 命令 | 说明 |
-|------|------|
-| `/quit` | 退出当前会话 |
-| `/plan <目标> [--save]` | 生成执行计划，可保存到 notes |
-| `/model` | 查看并切换模型 |
-| `/stats [current\|last\|session_id]` | 查看会话统计 |
-| `/export [current\|last\|session_id]` | 导出会话日志 |
-
-CLI 特点：
-
-- 启动快，适合直接执行代码分析或补丁任务。
-- 检测到补丁后会提示确认，并自动备份修改前文件。
-- 支持 `@file(...)`、`@dir(...)` 显式引用语法。
-- 多模态模型会直接发送图片，文本模型会自动走 OCR。
-- 可按需利用已注册的 skills，以及你已配置好的 MCP 扩展工具。
-
-## TUI
-<video src="images/tui.mp4" controls width="100%"></video>
-
-TUI 基于 Textual，适合长会话和持续观察执行过程的场景。它与 CLI 共享同一套 agent 能力，差异主要体现在界面、补全、trace 展示和交互体验上。
-
-启动命令：
-
-```bash
-python -m code_agent.hello_code_tui --repo /path/to/repo
-```
-
-TUI 内置命令：
-
-| 命令 | 说明 |
-|------|------|
-| `/quit` | 退出 |
-| `/plan <目标> [--save]` | 生成计划，可保存 |
-| `/model` 或 `/model <序号/模型名>` | 查看或切换模型 |
-| `/stats [current\|last\|session_id]` | 查看会话统计 |
-| `/export [current\|last\|session_id]` | 导出会话日志 |
-| `/clear` | 清空输出面板 |
-| `!<command>` | 直接执行终端命令，不经过 agent |
-
-TUI 额外交互：
-
-- `Ctrl+T`：展开或折叠 Trace Timeline。
-- `Ctrl+L`：切换 Logo 显示。
-- `Tab`：命令补全。
-- 输入 `@` 后会触发路径补全，使用裸路径引用，例如 `@core/llm.py`、`@code_agent/`。
-- Trace 面板会增量显示当前会话的 LLM、工具和补丁事件。
-- 与 CLI 共享同一套 skills 和 MCP 工具注册结果；MCP 仅在配置对应 server 后可用。
-
-## Skills 与 MCP
-
-### Skills 集成
-
-项目已经接入本地 skills 机制，入口在 `skills` 工具。当前实现会扫描这些标准目录：
-
-- `.agents/skills/`
-- `.opencode/skills/`
-- `.claude/skills/`
-- `~/.config/opencode/skills/`
-- `~/.claude/skills/`
-
-也可以通过 `CODE_AGENT_SKILLS_DIR` 覆盖为单一路径。运行时，Agent 会把 skills 列表作为轻量索引注入上下文，并在需要时调用 `skills[list/search/show]` 加载具体 SOP。
-
-### MCP 集成
-
-项目已经接入 MCPTool，并支持把 MCP server 暴露出来的工具自动展开注册到工具表里。当前代码中预留了两类 MCP 接入：
-
-- `MCP_MONITOR_COMMAND`：注册 monitor 类系统监控 MCP server，需要你自己提供可执行命令或二进制路径
-- `MCP_PLAYWRIGHT_COMMAND`：注册 playwright 类网页自动化 MCP server，通常可直接配置为 `npx -y @playwright/mcp`
-
-这两类 MCP 都是通过环境变量显式指定启动命令后才会启用，不依赖仓库内部的开发路径。
-
-也就是说：
-
-- Playwright 属于“用户机器上装好 Node.js 后，基本可以直接拉起”的类型。
-- Monitor 目前只是接入点已经预留好，但是否能用取决于你是否额外准备了对应的 MCP server。
-
-## 使用说明
-
-### 1. 提出任务
-
-直接输入自然语言即可，例如：
-
-```text
-帮我分析 tools/registry.py 的工具调用流程
-```
-
-### 2. 引用文件、目录或图片
-
-CLI 常用引用方式：
-
-```text
-@file(core/llm.py) 为什么这里会读到错误的环境变量？
-@dir(code_agent/, tools/) 帮我梳理这两个目录的职责
-@file(main.py, screenshot.png) 结合代码和截图分析问题
-```
-
-TUI 常用引用方式：
-
-```text
-@core/llm.py 为什么这里会读到错误的环境变量？
-@code_agent/ @tools/ 帮我梳理这两个目录的职责
-@main.py @screenshot.png 结合代码和截图分析问题
-```
-
-说明：
-
-- CLI 使用 `@file(...)`、`@dir(...)` 显式声明引用类型。
-- TUI 使用输入框里的裸 `@路径` 触发补全，文件和目录靠路径本身区分。
-- 图片在多模态模型下直接发送；文本模型下会自动 OCR。
-
-### 3. 审核并应用补丁
-
-当模型输出标准补丁时，Praxis 会自动识别并进入应用流程。高风险补丁会要求额外确认。
-
-```text
-*** Begin Patch
-*** Update File: path/to/file.py
-...
-*** End Patch
-```
-
-补丁应用后会记录：
-
-- 修改文件列表
-- 备份文件
-- 会话日志与 patch note
-
-### 4. 验证并迭代修复
-
-验证依然建议直接描述给 agent，或使用 `!<command>` 在 TUI 中执行终端命令后，再把结果继续交给 agent 处理。
-
-## 常见工作流
-
-### 代码阅读
+下面是几个典型交互示例：
 
 ```text
 @dir(core/, tools/) 先告诉我这两个模块分别负责什么，再指出主要入口
 ```
 
-### 定点修复
-
 ```text
 @file(core/config.py) 这里有弃用警告，帮我用最小改动修复
 ```
-
-### 带验证的修复闭环
 
 ```text
 修复完之后跑 pytest -q，若失败就根据输出继续改
 ```
 
-### 生成计划再执行
+CLI 演示截图：
 
-```text
-/plan 把 ToolRegistry 做一次小范围重构 --save
-```
+![CLI 运行截图](images/cli.png)
 
-## 配置参考
+TUI 演示视频：
 
-### 核心配置
+<video src="images/tui.mp4" controls width="100%"></video>
 
-| 环境变量 | 说明 |
-|----------|------|
-| `LLM_MODEL_ID` | 当前模型名，例如 `glm-4.7`、`deepseek-chat` |
-| `LLM_BASE_URL` | OpenAI 兼容接口地址 |
-| `LLM_API_KEY` | 通用 API Key；也可使用 provider 专用变量 |
-| `ZHIPU_API_KEY` | 智谱 API Key |
-| `DEEPSEEK_API_KEY` | DeepSeek API Key |
-| `DASHSCOPE_API_KEY` / `QWEN_API_KEY` | 通义千问 API Key |
-| `HELLOAGENTS_DIR` | 状态目录，默认 `.helloagents` |
-| `CODE_AGENT_MAX_REACT_STEPS` | ReAct 最大步数 |
-| `CODE_AGENT_MAX_STEPS` | `CODE_AGENT_MAX_REACT_STEPS` 的兼容别名 |
-| `LLM_TIMEOUT` | LLM 请求超时，单位秒 |
+## 🎯 项目亮点
 
-### TUI / 扩展能力相关配置
+- 本地仓库优先：围绕本地代码库分析、修改、验证设计，不依赖远端 SaaS 工作流。
+- 安全修改闭环：通过标准补丁格式执行代码修改，落盘前支持确认与备份。
+- 双界面体验：CLI 适合快速问答，TUI 适合长会话和过程观察。
+- 扩展能力完整：不仅支持内置工具，还支持 Skills 和 MCP 两类扩展机制。
+- 工程化更完整：包含日志、会话导出、计划生成、Todo 跟踪等能力。
 
-| 环境变量 | 说明 |
-|----------|------|
-| `CODE_AGENT_TRACE_ENABLED` | 是否启用 TUI Trace Timeline |
-| `CODE_AGENT_LOGO` | TUI 启动 Logo 图片路径，推荐放在 `images/logo.png` 或 `images/nailong.gif` |
-| `CODE_AGENT_LOGO_MODE` | Logo 渲染模式 |
-| `CODE_AGENT_LOGO_VISIBILITY` | `always` / `once` / `never` |
-| `MCP_MONITOR_COMMAND` | monitor MCP server 的启动命令 |
-| `MCP_PLAYWRIGHT_COMMAND` | Playwright MCP server 的启动命令 |
-| `CODE_AGENT_SKILLS_DIR` | 自定义 skills 根目录 |
+## 📊 性能评估
 
-状态目录默认位于 `.helloagents/`，常见内容包括：
+当前项目以功能完整性和交互体验为主，尚未形成统一的量化 benchmark，现阶段可确认的结果包括：
 
-- `notes/`：计划、行动、阻塞记录
-- `sessions/`：最近对话持久化
-- `logs/events.jsonl`：LLM / tool / patch 事件日志
-- `backups/`：补丁落盘前的备份
-- `todos/`：Todo 看板
-- `exports/`：通过 `/export` 导出的会话文件
+- 已完成 CLI 与 TUI 两套可运行入口
+- 已具备本地代码仓库分析与补丁执行闭环
+- 已支持会话日志、导出、Todo、Skills 与 MCP 扩展能力
+- 后续可补充任务成功率、平均响应时间和补丁应用成功率等指标
 
-## 架构概览
+## 🔮 未来计划
 
-```text
-code_agent/
-        hello_code_cli.py        CLI 入口
-        hello_code_tui.py        TUI 入口
-        agentic/code_agent.py    主循环、上下文拼装、工具调度
-        executors/               补丁执行器
+- [ ] 支持会话恢复与断点续传
+- [ ] 继续细化终端工具为更原子的命令工具
+- [ ] 重构 Note Tool 与 Memory Tool 的交互方式
+- [ ] 完善测试用例与自动化验证流程
+- [ ] 增加更多可直接启用的 MCP 工具模板
 
-agents/                    ReAct / Reflection / Plan 等 Agent
-core/                      LLM、配置、消息、异常
-context/                   上下文构建
-tools/                     Tool 基类、注册表、内置工具
-memory/                    记忆系统与检索管线
-utils/                     UI、日志、补丁、会话等通用能力
-```
+## 🤝 贡献指南
 
-核心执行链路：
+欢迎提出 Issue 和 Pull Request。
 
-1. CLI 或 TUI 接收用户输入。
-2. `CodeAgent` 解析 CLI 的 `@file` / `@dir` 引用，或 TUI 的裸 `@路径` / 图片引用。
-3. `ContextBuilder` 拼接系统提示、历史对话、最近工具证据。
-4. `ReActAgent` 决定是否调用工具，如 terminal、context_fetch、todo、plan、skills。
-5. 若生成补丁，则交给 `ApplyPatchExecutor` 应用并备份。
+## 📄 许可证
 
-## 开发与贡献
+MIT License
 
-欢迎提交 Issue 或 Pull Request。建议遵循：
+## 👤 作者
 
-1. 分支命名使用 `feat/<name>`、`fix/<name>`。
-2. 提交信息遵循 Conventional Commits。
-3. 涉及行为修改时附上验证步骤或测试。
+- GitHub: [@aug618](https://github.com/aug618)
+- 二次开发来源：YYHDBL-HelloCodeAgentCli
+- 上游项目仓库：https://github.com/aug618/Praxis
 
-## 许可证
+## 🙏 致谢
 
-本项目使用 [MIT License](LICENSE)。
+感谢 Datawhale 社区和 Hello-Agents 项目。
+
+同时感谢 YYHDBL-HelloCodeAgentCli 项目为本项目提供二次开发基础。
