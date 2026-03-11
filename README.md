@@ -2,6 +2,8 @@
 
 # Praxis
 
+<img src="images/logo.png" alt="Praxis Logo" width="200" style="display: block; margin: 0 auto;">
+
 **一个面向本地代码仓库的 AI 编程助手，提供 CLI 与 TUI 两套交互界面。**
 
 [![Python](https://img.shields.io/badge/python-3.12+-3776ab?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
@@ -15,6 +17,11 @@
 ---
 
 Praxis 基于 ReAct 工作流运行：先收集代码证据，再决定是否调用工具，最后生成补丁并在确认后落盘。项目面向本地仓库使用，支持文件/目录引用、补丁确认、会话日志、模型切换，以及面向长会话的 TUI 交互。
+
+另外，Praxis 还集成了两类扩展能力：
+
+- Skills：把本地安装的技能包当作渐进式加载的 SOP/工作流知识源，Agent 可以先发现，再按需读取具体 SKILL.md。
+- MCP：支持通过外部 MCP server 挂载更多工具。当前代码里已经接好了 monitor 和 playwright 两类 MCP 接入点，但它们都属于“配置后启用”的可选扩展。其中 playwright 通常可以直接通过 `npx` 启动，monitor 则需要你自己提供可执行 server 命令。
 
 ## 快速开始
 
@@ -100,6 +107,7 @@ CLI 特点：
 - 检测到补丁后会提示确认，并自动备份修改前文件。
 - 支持 `@file(...)`、`@dir(...)` 显式引用语法。
 - 多模态模型会直接发送图片，文本模型会自动走 OCR。
+- 可按需利用已注册的 skills，以及你已配置好的 MCP 扩展工具。
 
 ## TUI
 <video src="images/tui.mp4" controls width="100%"></video>
@@ -131,6 +139,35 @@ TUI 额外交互：
 - `Tab`：命令补全。
 - 输入 `@` 后会触发路径补全，使用裸路径引用，例如 `@core/llm.py`、`@code_agent/`。
 - Trace 面板会增量显示当前会话的 LLM、工具和补丁事件。
+- 与 CLI 共享同一套 skills 和 MCP 工具注册结果；MCP 仅在配置对应 server 后可用。
+
+## Skills 与 MCP
+
+### Skills 集成
+
+项目已经接入本地 skills 机制，入口在 `skills` 工具。当前实现会扫描这些标准目录：
+
+- `.agents/skills/`
+- `.opencode/skills/`
+- `.claude/skills/`
+- `~/.config/opencode/skills/`
+- `~/.claude/skills/`
+
+也可以通过 `CODE_AGENT_SKILLS_DIR` 覆盖为单一路径。运行时，Agent 会把 skills 列表作为轻量索引注入上下文，并在需要时调用 `skills[list/search/show]` 加载具体 SOP。
+
+### MCP 集成
+
+项目已经接入 MCPTool，并支持把 MCP server 暴露出来的工具自动展开注册到工具表里。当前代码中预留了两类 MCP 接入：
+
+- `MCP_MONITOR_COMMAND`：注册 monitor 类系统监控 MCP server，需要你自己提供可执行命令或二进制路径
+- `MCP_PLAYWRIGHT_COMMAND`：注册 playwright 类网页自动化 MCP server，通常可直接配置为 `npx -y @playwright/mcp`
+
+这两类 MCP 都是通过环境变量显式指定启动命令后才会启用，不依赖仓库内部的开发路径。
+
+也就是说：
+
+- Playwright 属于“用户机器上装好 Node.js 后，基本可以直接拉起”的类型。
+- Monitor 目前只是接入点已经预留好，但是否能用取决于你是否额外准备了对应的 MCP server。
 
 ## 使用说明
 
@@ -238,8 +275,8 @@ TUI 常用引用方式：
 | `CODE_AGENT_LOGO` | TUI 启动 Logo 图片路径，推荐放在 `images/logo.png` 或 `images/nailong.gif` |
 | `CODE_AGENT_LOGO_MODE` | Logo 渲染模式 |
 | `CODE_AGENT_LOGO_VISIBILITY` | `always` / `once` / `never` |
-| `MCP_MONITOR_COMMAND` | 注册 monitor MCP 工具的启动命令 |
-| `MCP_PLAYWRIGHT_COMMAND` | 注册 Playwright MCP 工具的启动命令 |
+| `MCP_MONITOR_COMMAND` | monitor MCP server 的启动命令 |
+| `MCP_PLAYWRIGHT_COMMAND` | Playwright MCP server 的启动命令 |
 | `CODE_AGENT_SKILLS_DIR` | 自定义 skills 根目录 |
 
 状态目录默认位于 `.helloagents/`，常见内容包括：

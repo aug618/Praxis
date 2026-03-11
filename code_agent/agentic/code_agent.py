@@ -130,18 +130,11 @@ class CodeAgent:
             pass
 
         # ========== MCP Monitor 工具（系统监控）==========
-        # 优先使用环境变量 MCP_MONITOR_COMMAND。
-        # 默认路径需要显式开启（避免 TUI 启动时刷屏 / 启动额外进程）。
+        # 通过环境变量 MCP_MONITOR_COMMAND 指定启动命令。
         monitor_cmd: Optional[List[str]] = None
         env_cmd = env_stripped("MCP_MONITOR_COMMAND", "")
         if env_cmd:
             monitor_cmd = shlex.split(env_cmd)
-        else:
-            enable_default = env_flag("CODE_AGENT_ENABLE_MCP_MONITOR", default=False)
-            if enable_default:
-                default_bin = self.paths.repo_root / "test" / "mcp-monitor" / "bin" / "mcp-monitor"
-                if default_bin.exists():
-                    monitor_cmd = [str(default_bin)]
 
         if monitor_cmd:
             try:
