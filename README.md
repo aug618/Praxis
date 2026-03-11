@@ -98,7 +98,7 @@ CLI 特点：
 
 - 启动快，适合直接执行代码分析或补丁任务。
 - 检测到补丁后会提示确认，并自动备份修改前文件。
-- 支持 `@file(...)`、`@dir(...)` 引用语法。
+- 支持 `@file(...)`、`@dir(...)` 显式引用语法。
 - 多模态模型会直接发送图片，文本模型会自动走 OCR。
 
 ## TUI
@@ -129,6 +129,7 @@ TUI 额外交互：
 - `Ctrl+T`：展开或折叠 Trace Timeline。
 - `Ctrl+L`：切换 Logo 显示。
 - `Tab`：命令补全。
+- 输入 `@` 后会触发路径补全，使用裸路径引用，例如 `@core/llm.py`、`@code_agent/`。
 - Trace 面板会增量显示当前会话的 LLM、工具和补丁事件。
 
 ## 使用说明
@@ -143,7 +144,7 @@ TUI 额外交互：
 
 ### 2. 引用文件、目录或图片
 
-常用引用方式：
+CLI 常用引用方式：
 
 ```text
 @file(core/llm.py) 为什么这里会读到错误的环境变量？
@@ -151,10 +152,18 @@ TUI 额外交互：
 @file(main.py, screenshot.png) 结合代码和截图分析问题
 ```
 
+TUI 常用引用方式：
+
+```text
+@core/llm.py 为什么这里会读到错误的环境变量？
+@code_agent/ @tools/ 帮我梳理这两个目录的职责
+@main.py @screenshot.png 结合代码和截图分析问题
+```
+
 说明：
 
-- `@file(...)` 适合精确分析单个或多个文件。
-- `@dir(...)` 会把目录结构和关键文件作为上下文注入。
+- CLI 使用 `@file(...)`、`@dir(...)` 显式声明引用类型。
+- TUI 使用输入框里的裸 `@路径` 触发补全，文件和目录靠路径本身区分。
 - 图片在多模态模型下直接发送；文本模型下会自动 OCR。
 
 ### 3. 审核并应用补丁
@@ -226,7 +235,7 @@ TUI 额外交互：
 | 环境变量 | 说明 |
 |----------|------|
 | `CODE_AGENT_TRACE_ENABLED` | 是否启用 TUI Trace Timeline |
-| `CODE_AGENT_LOGO` | TUI 启动 Logo 图片路径 |
+| `CODE_AGENT_LOGO` | TUI 启动 Logo 图片路径，推荐放在 `images/logo.png` 或 `images/nailong.gif` |
 | `CODE_AGENT_LOGO_MODE` | Logo 渲染模式 |
 | `CODE_AGENT_LOGO_VISIBILITY` | `always` / `once` / `never` |
 | `MCP_MONITOR_COMMAND` | 注册 monitor MCP 工具的启动命令 |
@@ -262,7 +271,7 @@ utils/                     UI、日志、补丁、会话等通用能力
 核心执行链路：
 
 1. CLI 或 TUI 接收用户输入。
-2. `CodeAgent` 解析 `@file` / `@dir` / 图片等引用。
+2. `CodeAgent` 解析 CLI 的 `@file` / `@dir` 引用，或 TUI 的裸 `@路径` / 图片引用。
 3. `ContextBuilder` 拼接系统提示、历史对话、最近工具证据。
 4. `ReActAgent` 决定是否调用工具，如 terminal、context_fetch、todo、plan、skills。
 5. 若生成补丁，则交给 `ApplyPatchExecutor` 应用并备份。

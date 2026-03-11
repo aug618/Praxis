@@ -39,14 +39,12 @@ from core.exceptions import HelloAgentsException
 from core.llm import HelloAgentsLLM
 from code_agent.agentic import CodeAgent
 from code_agent.executors.apply_patch_executor import ApplyPatchExecutor, PatchApplyError
-from context.builder import ContextPacket
 from utils.env import env_flag, env_flag_true, env_lower, env_str, env_stripped
 from utils.observability import log_event
 from utils.tui_ui import (
     TUI_CSS,
     extract_patch,
     normalize_patch,
-    patch_requires_confirmation,
     load_events,
     summarize_session,
     export_session,
@@ -59,12 +57,6 @@ CONFIRM_TOOL_RE = re.compile(r"\[\[CONFIRM_TOOL\]\]([\s\S]*?)\[\[/CONFIRM_TOOL\]
 
 def _strip_ansi(text: str) -> str:
     return ANSI_RE.sub("", text or "")
-
-
-def _hr(char: str = "=", width: int = 80) -> str:
-    return char * width
-
-
 class _StreamingTUIWriter(io.TextIOBase):
     """A stdout/stderr-like stream that forwards output to the TUI in near-real-time.
 
@@ -209,7 +201,6 @@ class CodeAgentTUI(App):
         self.pending_bang_command: str | None = None
 
         self._completion_start: Optional[int] = None
-        self._completion_prefix: Optional[str] = None
         self._completion_tag: Optional[str] = None
         self._suggestions: list[str] = []
         self._busy: bool = False
@@ -498,7 +489,7 @@ class CodeAgentTUI(App):
 
         优先级：
         1) 环境变量 `CODE_AGENT_LOGO` 指定的图片路径
-        2) repo 内常见路径（如 test/t.png）
+        2) repo 内可提交的常见路径（如 images/ 或 assets/）
         3) 兜底：内置 ASCII art
         """
 
@@ -512,7 +503,13 @@ class CodeAgentTUI(App):
                 [
                     self.repo_root / "assets" / "logo.png",
                     self.repo_root / "assets" / "logo.jpg",
-                    self.repo_root / "test" / "t.png",
+                    self.repo_root / "assets" / "logo.gif",
+                    self.repo_root / "images" / "logo.png",
+                    self.repo_root / "images" / "logo.jpg",
+                    self.repo_root / "images" / "logo.gif",
+                    self.repo_root / "images" / "nailong.png",
+                    self.repo_root / "images" / "nailong.jpg",
+                    self.repo_root / "images" / "nailong.gif",
                 ]
             )
             return candidates
@@ -888,13 +885,11 @@ class CodeAgentTUI(App):
             suggestions_view.display = True
             suggestions_view.index = 0
             self._completion_start = replace_start
-            self._completion_prefix = prefix
             self._completion_tag = tag
         else:
             self._suggestions = []
             suggestions_view.display = False
             self._completion_start = None
-            self._completion_prefix = None
             self._completion_tag = None
 
     def _extract_completion_context(self, text: str) -> tuple[str | None, str | None, Optional[int]]:
